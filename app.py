@@ -522,8 +522,7 @@ if st.button("Realizar Dimensionamento Completo"):
                     tex_str = ""
 
                 if tex_str:
-                    st.subheader("📄 Pré-visualização da Memória de Cálculo (LaTeX)")
-                    st.code(tex_str, language="latex")
+                    
 
                     st.download_button(
                         label="⬇️ Baixar Memória de Cálculo (.tex)",
