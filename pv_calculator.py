@@ -85,7 +85,8 @@ def calcular_energia_gerada(potencia_pico, latitude, longitude, azimuth, tilt, m
         'tilt': tilt,
         'azimuth': azimuth,
         'lat': latitude,
-        'lon': longitude
+        'lon': longitude,
+        'dataset': 'intl'
     }
     
     data = fazer_requisicao_pvwatts(params)
