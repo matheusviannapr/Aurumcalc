@@ -22,7 +22,7 @@ from pv_calculator import (
 # --- Import opcional do gerador de LaTeX da memória de cálculo ---
 BUILD_TEX = True
 try:
-    from memoria_calculo import build_memoria_calculo_latex
+    from memoria_calculo import gerar_memoria_calculo_latex
 except Exception:
     BUILD_TEX = False
 
