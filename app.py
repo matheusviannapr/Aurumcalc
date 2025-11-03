@@ -1,13 +1,42 @@
+# app.py  — versão consolidada com fixes de coordenadas + API key + diagnóstico PVWatts
+
+import os
 import streamlit as st
 import pandas as pd
-import inspect
+
 from pv_calculator import (
-    realizar_dimensionamento_completo, 
-    carregar_dados_equipamentos, 
+    realizar_dimensionamento_completo,
+    carregar_dados_equipamentos,
     geocode_location,
     salvar_novo_painel,
-    salvar_novo_inversor
+    salvar_novo_inversor,
 )
+
+# =========================================================
+# API KEY PVWATTS (usa st.secrets, senão mantém ambiente)
+# =========================================================
+try:
+    if "PVWATTS_API_KEY" in st.secrets:
+        os.environ["PVWATTS_API_KEY"] = st.secrets["PVWATTS_API_KEY"]
+except Exception:
+    pass
+
+# =========================================================
+# Helpers de saneamento
+# =========================================================
+def _to_float(x, default=None):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+def _clamp(v, vmin, vmax):
+    v = _to_float(v, vmin)
+    if v < vmin:
+        return vmin
+    if v > vmax:
+        return vmax
+    return v
 
 # =========================================================
 # CONFIGURAÇÃO DA PÁGINA
@@ -15,7 +44,7 @@ from pv_calculator import (
 st.set_page_config(
     page_title="Dimensionamento Fotovoltaico Integrado",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # =========================================================
@@ -67,18 +96,19 @@ def load_data():
         return pd.DataFrame(), pd.DataFrame()
 
 def apply_coordinates():
-    """Aplica coordenadas encontradas à UI e ao session_state."""
+    """Aplica coordenadas encontradas à UI e ao session_state (com saneamento)."""
     if st.session_state["search_lat"] is not None and st.session_state["search_lon"] is not None:
-        st.session_state["latitude_input"] = st.session_state["search_lat"]
-        st.session_state["longitude_input"] = st.session_state["search_lon"]
-        st.session_state["latitude"] = st.session_state["search_lat"]
-        st.session_state["longitude"] = st.session_state["search_lon"]
+        lat = _clamp(st.session_state["search_lat"],  -90.0,  90.0)
+        lon = _clamp(st.session_state["search_lon"], -180.0, 180.0)
+
+        st.session_state["latitude_input"] = lat
+        st.session_state["longitude_input"] = lon
+        st.session_state["latitude"] = lat
+        st.session_state["longitude"] = lon
         st.session_state["search_lat"] = None
         st.session_state["search_lon"] = None
-        st.success(
-            f"Coordenadas aplicadas: Lat={st.session_state['latitude']:.4f}, "
-            f"Lon={st.session_state['longitude']:.4f}"
-        )
+
+        st.success(f"Coordenadas aplicadas: Lat={lat:.6f}, Lon={lon:.6f}")
     else:
         st.warning("Nenhuma coordenada para aplicar. Faça a busca primeiro.")
 
@@ -91,7 +121,7 @@ def search_coordinates(location_name: str):
                 st.session_state["search_lat"] = lat_geo
                 st.session_state["search_lon"] = lon_geo
                 st.success(
-                    f"Localização encontrada: Lat={lat_geo:.4f}, Lon={lon_geo:.4f}. "
+                    f"Localização encontrada: Lat={lat_geo:.6f}, Lon={lon_geo:.6f}. "
                     "Clique em 'Aplicar Coordenadas' para usar."
                 )
             else:
@@ -100,102 +130,6 @@ def search_coordinates(location_name: str):
                 st.session_state["search_lon"] = None
     else:
         st.warning("Digite o nome da localização.")
-
-def chamar_dimensionamento_seguro(**contexto):
-    """
-    Chama realizar_dimensionamento_completo mapeando valores por NOME EXATO da assinatura.
-    - Para cada parâmetro da função, tentamos achar um valor no contexto usando aliases.
-    - Montamos **kwargs com nomes EXATOS aceitos pela função e *args* apenas para positional-only.
-    - Normalizamos o retorno para (df, erro).
-    """
-    import inspect
-    sig = inspect.signature(realizar_dimensionamento_completo)
-    params = sig.parameters
-
-    # Valores disponíveis do app (e derivados)
-    candidatos_base = {
-        "latitude": contexto.get("latitude"),
-        "longitude": contexto.get("longitude"),
-        "azimuth": contexto.get("azimuth"),
-        "tilt": contexto.get("tilt"),
-        "consumo_medio_mensal": contexto.get("consumo_medio_mensal"),
-        "consumo_mensal_kwh": contexto.get("consumo_medio_mensal"),
-        "consumo_anual_kwh": (
-            (contexto.get("consumo_medio_mensal") or 0) * 12
-            if contexto.get("consumo_medio_mensal") is not None else None
-        ),
-        "arquivo_equipamentos": contexto.get("FILE_PATH_EQUIPAMENTOS"),
-        "df_paineis": contexto.get("df_paineis"),
-        "df_inversores": contexto.get("df_inversores"),
-        "api_key": contexto.get("api_key"),
-        "perdas_percentuais": contexto.get("perdas_percentuais"),
-    }
-
-    # Aliases para casar nomes diferentes
-    alias_map = {
-        "latitude": ["latitude", "lat", "phi", "y"],
-        "longitude": ["longitude", "lon", "lng", "lambda", "x"],
-        "azimuth": ["azimuth", "azim", "az", "azimuth_graus", "orientacao"],
-        "tilt": ["tilt", "inclinacao", "slope", "beta"],
-        "consumo_medio_mensal": ["consumo_medio_mensal", "consumo_mensal_kwh"],
-        "consumo_anual_kwh": ["consumo_anual_kwh"],
-        "arquivo_equipamentos": ["arquivo_equipamentos", "file_path_equipamentos"],
-        "df_paineis": ["df_paineis"],
-        "df_inversores": ["df_inversores"],
-        "api_key": ["api_key", "apikey", "pvwatts_api_key"],
-        "perdas_percentuais": ["perdas_percentuais", "losses", "perdas"],
-    }
-
-    def obter_valor_por_alias(nome_param):
-        # tenta nome exato primeiro
-        if nome_param in candidatos_base and candidatos_base[nome_param] is not None:
-            return candidatos_base[nome_param]
-        # tenta aliases conhecidos
-        for k, aliases in alias_map.items():
-            if nome_param == k:
-                for alias in aliases:
-                    val = candidatos_base.get(alias)
-                    if val is not None:
-                        return val
-        # fallback: se o próprio nome_param existir em candidatos_base
-        return candidatos_base.get(nome_param)
-
-    args = []
-    kwargs = {}
-
-    for nome, p in params.items():
-        val = obter_valor_por_alias(nome)
-
-        if p.kind == inspect.Parameter.POSITIONAL_ONLY:
-            # precisa ir por posição
-            if val is None and p.default is inspect._empty:
-                raise TypeError(f"Parâmetro obrigatório '{nome}' não fornecido.")
-            args.append(val)
-        elif p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
-            # pode ir como keyword com o NOME EXATO da assinatura
-            if val is not None:
-                kwargs[nome] = val
-            elif p.default is inspect._empty:
-                # obrigatório sem valor
-                raise TypeError(f"Parâmetro obrigatório '{nome}' não fornecido.")
-        elif p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-            # *args ou **kwargs da função — não precisamos alimentar explicitamente aqui
-            pass
-
-    # Chamada final: prioriza keywords com nomes exatos + eventuais args positional-only
-    try:
-        resultado = realizar_dimensionamento_completo(*args, **kwargs)
-    except TypeError as e:
-        # Mostra exatamente como chamamos (ajuda no debug)
-        raise TypeError(f"Parâmetros incompatíveis ao chamar realizar_dimensionamento_completo "
-                        f"com args={args} e kwargs={kwargs}: {e}")
-
-    # Normaliza retorno para (df, erro)
-    if isinstance(resultado, tuple) and len(resultado) == 2:
-        df, erro = resultado
-    else:
-        df, erro = resultado, None
-    return df, erro
 
 # =========================================================
 # SIDEBAR
@@ -335,8 +269,8 @@ with col1:
 
 if st.session_state["search_lat"] is not None and st.session_state["search_lon"] is not None:
     st.button(
-        f"Aplicar Coordenadas Encontradas: Lat={st.session_state['search_lat']:.4f}, "
-        f"Lon={st.session_state['search_lon']:.4f}",
+        f"Aplicar Coordenadas Encontradas: Lat={st.session_state['search_lat']:.6f}, "
+        f"Lon={st.session_state['search_lon']:.6f}",
         on_click=apply_coordinates
     )
 
@@ -344,17 +278,18 @@ with col2:
     latitude = st.number_input(
         "Latitude (°)",
         value=st.session_state["latitude"],
-        format="%.4f",
+        format="%.6f",
         key="latitude_input",
         help="Latitude do local de instalação."
     )
     longitude = st.number_input(
         "Longitude (°)",
         value=st.session_state["longitude"],
-        format="%.4f",
+        format="%.6f",
         key="longitude_input",
         help="Longitude do local de instalação."
     )
+    # Mantém sessão sincronizada
     st.session_state["latitude"] = latitude
     st.session_state["longitude"] = longitude
 
@@ -367,7 +302,7 @@ with col3:
         help="0°=Norte, 90°=Leste, 180°=Sul, 270°=Oeste."
     )
 with col4:
-    tilt_sugerido = abs(latitude)
+    tilt_sugerido = abs(_to_float(latitude, 0.0))
     tilt = st.number_input(
         f"Tilt (Inclinação) Sugerido: {tilt_sugerido:.2f}°",
         value=tilt_sugerido,
@@ -378,13 +313,20 @@ with col4:
 st.markdown("---")
 
 # =========================================================
-# DIAGNÓSTICO OPCIONAL (ver assinatura da função)
+# Diagnóstico PVWatts (útil quando aplica localização)
 # =========================================================
-with st.expander("🔧 Diagnóstico (opcional)"):
-    try:
-        st.write("Assinatura realizar_dimensionamento_completo:", str(inspect.signature(realizar_dimensionamento_completo)))
-    except Exception as e:
-        st.write("Não foi possível inspecionar a assinatura:", e)
+with st.expander("🔎 Diagnóstico PVWatts"):
+    diag_lat  = _clamp(latitude,  -90.0,  90.0)
+    diag_lon  = _clamp(longitude, -180.0, 180.0)
+    diag_tilt = _clamp(tilt,        0.0,  90.0)
+    diag_az   = int(_clamp(azimuth, 0.0, 359.0))
+    st.write({
+        "lat": diag_lat,
+        "lon": diag_lon,
+        "tilt": diag_tilt,
+        "azimuth": diag_az,
+        "api_key_set": bool(os.environ.get("PVWATTS_API_KEY")),
+    })
 
 # =========================================================
 # BOTÃO: CALCULAR
@@ -394,23 +336,20 @@ if st.button("Realizar Dimensionamento Completo"):
         st.error("O consumo médio mensal deve ser maior que zero.")
         st.stop()
 
-    # Não bloqueamos app se BD estiver vazio, pois a função pode carregar internamente
-    if df_paineis.empty or df_inversores.empty:
-        st.warning("Base de equipamentos vazia. Se a função carregar internamente, ignore este aviso.")
+    # força tipos válidos e faixas para enviar à PVWatts
+    lat  = _clamp(latitude,  -90.0,  90.0)
+    lon  = _clamp(longitude, -180.0, 180.0)
+    tit  = _clamp(tilt,        0.0,  90.0)
+    azim = int(_clamp(azimuth, 0.0, 359.0))
 
     with st.spinner("Calculando potência de pico e dimensionando o sistema..."):
         try:
-            resultados_df, erro = chamar_dimensionamento_seguro(
-                latitude=latitude,
-                longitude=longitude,
-                azimuth=azimuth,
-                tilt=tilt,
-                consumo_medio_mensal=consumo_medio_mensal,
-                df_paineis=df_paineis,
-                df_inversores=df_inversores,
-                FILE_PATH_EQUIPAMENTOS=FILE_PATH_EQUIPAMENTOS,
-                api_key=st.secrets.get("PVWATTS_API_KEY"),
-                # perdas_percentuais=0.14,
+            resultados_df, erro = realizar_dimensionamento_completo(
+                consumo_medio_mensal,
+                lat,
+                lon,
+                azim,
+                tit,
             )
         except Exception as e:
             import sys, traceback
@@ -469,7 +408,6 @@ if st.button("Realizar Dimensionamento Completo"):
         cols_existentes = [c for c in colunas_esperadas if c in resultados_df.columns]
         df_display = resultados_df[cols_existentes].copy()
 
-        # Renomeia colunas se existirem
         renomear = {
             "inversor_modelo": "Inversor (Modelo)",
             "inversor_fabricante": "Inversor (Fabricante)",
@@ -485,7 +423,6 @@ if st.button("Realizar Dimensionamento Completo"):
         }
         df_display.rename(columns=renomear, inplace=True)
 
-        # Formata numéricos, se existir
         if "Painel (Potência Wp)" in df_display.columns:
             df_display["Painel (Potência Wp)"] = df_display["Painel (Potência Wp)"].apply(
                 lambda x: f"{x:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -510,7 +447,7 @@ if st.button("Realizar Dimensionamento Completo"):
         # DETALHES TÉCNICOS
         st.subheader("2.3. Detalhes Técnicos do Melhor Arranjo")
         melhor_arranjo = resultados_df.iloc[0]
-        def fmt_int(x): 
+        def fmt_int(x):
             try:
                 return f"{x:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
             except Exception:
