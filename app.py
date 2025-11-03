@@ -267,12 +267,7 @@ with col1:
     if st.button("Buscar Coordenadas"):
         search_coordinates(location_name)
 
-if st.session_state["search_lat"] is not None and st.session_state["search_lon"] is not None:
-    st.button(
-        f"Aplicar Coordenadas Encontradas: Lat={st.session_state['search_lat']:.6f}, "
-        f"Lon={st.session_state['search_lon']:.6f}",
-        on_click=apply_coordinates
-    )
+    
 
 with col2:
     latitude = st.number_input(
