@@ -495,7 +495,7 @@ if st.button("Realizar Dimensionamento Completo"):
                     "sistema_num_total_paineis": melhor_arranjo.get("sistema_num_total_paineis"),
                     "sistema_potencia_total_w": melhor_arranjo.get("sistema_potencia_total_w"),
                 }
-                tex_str = build_memoria_calculo_latex(payload)
+                tex_str = gerar_memoria_calculo_latex(payload)
                 st.download_button(
                     label="📄 Baixar Memória de Cálculo (LaTeX)",
                     data=tex_str,
