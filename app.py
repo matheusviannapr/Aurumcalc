@@ -1,54 +1,25 @@
-# app.py  — versão consolidada com fixes de coordenadas + API key + diagnóstico PVWatts
-
-import os
 import streamlit as st
 import pandas as pd
-
+import inspect
 from pv_calculator import (
     realizar_dimensionamento_completo,
     carregar_dados_equipamentos,
     geocode_location,
     salvar_novo_painel,
-    salvar_novo_inversor,
+    salvar_novo_inversor
 )
 
 # =========================================================
-# API KEY PVWATTS (usa st.secrets, senão mantém ambiente)
-# =========================================================
-try:
-    if "PVWATTS_API_KEY" in st.secrets:
-        os.environ["PVWATTS_API_KEY"] = st.secrets["PVWATTS_API_KEY"]
-except Exception:
-    pass
-
-# =========================================================
-# Helpers de saneamento
-# =========================================================
-def _to_float(x, default=None):
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-def _clamp(v, vmin, vmax):
-    v = _to_float(v, vmin)
-    if v < vmin:
-        return vmin
-    if v > vmax:
-        return vmax
-    return v
-
-# =========================================================
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIG
 # =========================================================
 st.set_page_config(
     page_title="Dimensionamento Fotovoltaico Integrado",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="expanded"
 )
 
 # =========================================================
-# ESTILO (tema azul marinho com fonte branca)
+# ESTILO
 # =========================================================
 custom_css = """
 <style>
@@ -66,13 +37,10 @@ custom_css = """
 """
 st.markdown(custom_css, unsafe_allow_html=True)
 
-# =========================================================
-# VARIÁVEIS GLOBAIS
-# =========================================================
 FILE_PATH_EQUIPAMENTOS = "BDFotovoltaica.xlsx"
 
 # =========================================================
-# SESSION STATE (defaults)
+# SESSION STATE
 # =========================================================
 if "latitude" not in st.session_state:
     st.session_state["latitude"] = -20.46
@@ -84,10 +52,18 @@ if "search_lon" not in st.session_state:
     st.session_state["search_lon"] = None
 
 # =========================================================
-# FUNÇÕES AUXILIARES
+# HELPERS
 # =========================================================
+def fmt_num(x, casas=2, vazio="—"):
+    try:
+        if x is None:
+            return vazio
+        xv = float(x)
+        return f"{xv:,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return vazio
+
 def load_data():
-    """Carrega o BD de equipamentos (planilha) com tratamento de erro."""
     try:
         df_paineis, df_inversores = carregar_dados_equipamentos(FILE_PATH_EQUIPAMENTOS)
         return df_paineis, df_inversores
@@ -96,24 +72,21 @@ def load_data():
         return pd.DataFrame(), pd.DataFrame()
 
 def apply_coordinates():
-    """Aplica coordenadas encontradas à UI e ao session_state (com saneamento)."""
     if st.session_state["search_lat"] is not None and st.session_state["search_lon"] is not None:
-        lat = _clamp(st.session_state["search_lat"],  -90.0,  90.0)
-        lon = _clamp(st.session_state["search_lon"], -180.0, 180.0)
-
-        st.session_state["latitude_input"] = lat
-        st.session_state["longitude_input"] = lon
-        st.session_state["latitude"] = lat
-        st.session_state["longitude"] = lon
+        st.session_state["latitude_input"]  = round(st.session_state["search_lat"], 5)
+        st.session_state["longitude_input"] = round(st.session_state["search_lon"], 5)
+        st.session_state["latitude"]  = st.session_state["latitude_input"]
+        st.session_state["longitude"] = st.session_state["longitude_input"]
         st.session_state["search_lat"] = None
         st.session_state["search_lon"] = None
-
-        st.success(f"Coordenadas aplicadas: Lat={lat:.6f}, Lon={lon:.6f}")
+        st.success(
+            f"Coordenadas aplicadas: Lat={st.session_state['latitude']:.5f}, "
+            f"Lon={st.session_state['longitude']:.5f}"
+        )
     else:
         st.warning("Nenhuma coordenada para aplicar. Faça a busca primeiro.")
 
 def search_coordinates(location_name: str):
-    """Busca coordenadas via geocode_location e guarda no session_state."""
     if location_name:
         with st.spinner(f"Buscando coordenadas para '{location_name}'..."):
             lat_geo, lon_geo = geocode_location(location_name)
@@ -121,7 +94,7 @@ def search_coordinates(location_name: str):
                 st.session_state["search_lat"] = lat_geo
                 st.session_state["search_lon"] = lon_geo
                 st.success(
-                    f"Localização encontrada: Lat={lat_geo:.6f}, Lon={lon_geo:.6f}. "
+                    f"Localização encontrada: Lat={lat_geo:.5f}, Lon={lon_geo:.5f}. "
                     "Clique em 'Aplicar Coordenadas' para usar."
                 )
             else:
@@ -130,6 +103,50 @@ def search_coordinates(location_name: str):
                 st.session_state["search_lon"] = None
     else:
         st.warning("Digite o nome da localização.")
+
+def chamar_dimensionamento_seguro(**contexto):
+    """
+    Chama realizar_dimensionamento_completo mapeando por NOME EXATO da assinatura.
+    Normaliza retorno para (df, erro).
+    """
+    sig = inspect.signature(realizar_dimensionamento_completo)
+    params = sig.parameters
+
+    candidatos_base = {
+        "latitude": contexto.get("latitude"),
+        "longitude": contexto.get("longitude"),
+        "azimuth": contexto.get("azimuth"),
+        "tilt": contexto.get("tilt"),
+        "consumo_medio_mensal": contexto.get("consumo_medio_mensal"),
+    }
+
+    args = []
+    kwargs = {}
+    for nome, p in params.items():
+        val = candidatos_base.get(nome)
+        if p.kind == inspect.Parameter.POSITIONAL_ONLY:
+            if val is None and p.default is inspect._empty:
+                raise TypeError(f"Parâmetro obrigatório '{nome}' não fornecido.")
+            args.append(val)
+        elif p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            if val is not None:
+                kwargs[nome] = val
+            elif p.default is inspect._empty:
+                raise TypeError(f"Parâmetro obrigatório '{nome}' não fornecido.")
+        else:
+            pass
+
+    try:
+        resultado = realizar_dimensionamento_completo(*args, **kwargs)
+    except TypeError as e:
+        raise TypeError(f"Parâmetros incompatíveis ao chamar realizar_dimensionamento_completo "
+                        f"com args={args} e kwargs={kwargs}: {e}")
+
+    if isinstance(resultado, tuple) and len(resultado) == 2:
+        df, erro = resultado
+    else:
+        df, erro = resultado, None
+    return df, erro
 
 # =========================================================
 # SIDEBAR
@@ -145,16 +162,12 @@ df_paineis, df_inversores = load_data()
 with st.sidebar.expander("Dados de Equipamentos Carregados"):
     st.subheader("Painéis Solares")
     if not df_paineis.empty:
-        st.dataframe(
-            df_paineis[["modelo", "potencia_maxima_nominal_pmax", "tensao_circuito_aberto_voc"]].head()
-        )
+        st.dataframe(df_paineis[["modelo", "potencia_maxima_nominal_pmax", "tensao_circuito_aberto_voc"]].head())
     else:
         st.info("Base de painéis vazia.")
     st.subheader("Inversores")
     if not df_inversores.empty:
-        st.dataframe(
-            df_inversores[["modelo", "maxima_potencia_nominal_ca", "tensao_maxima_cc"]].head()
-        )
+        st.dataframe(df_inversores[["modelo", "maxima_potencia_nominal_ca", "tensao_maxima_cc"]].head())
     else:
         st.info("Base de inversores vazia.")
 
@@ -169,8 +182,7 @@ with st.sidebar.expander("➕ Inserir Novo Equipamento"):
         vmp = st.number_input("Tensão de Operação Ótima (Vmp) [V]", min_value=1.0, step=0.1, format="%.2f", key="vmp_p")
         imp = st.number_input("Corrente de Operação Ótima (Imp) [A]", min_value=1.0, step=0.1, format="%.2f", key="imp_p")
         eficiencia = st.number_input("Eficiência do Módulo [%]", min_value=1.0, max_value=100.0, step=0.1, format="%.2f", key="eficiencia_p")
-        submitted_painel = st.form_submit_button("Salvar Painel")
-        if submitted_painel:
+        if st.form_submit_button("Salvar Painel"):
             if modelo_p and pmax > 0 and voc > 0 and isc > 0:
                 novo_painel_data = {
                     "modelo": modelo_p,
@@ -209,9 +221,7 @@ with st.sidebar.expander("➕ Inserir Novo Equipamento"):
         i_saida_max = st.number_input("Corrente de Saída Máxima [A]", min_value=1.0, step=0.1, format="%.2f", key="i_saida_max_i")
         fp_ajustavel = st.text_input("Fator de Potência Ajustável (Ex: 0.8i-0.8c)", key="fp_ajustavel_i")
         fases_ca = st.number_input("Quantidade de Fases CA", min_value=1, step=1, format="%d", key="fases_ca_i")
-
-        submitted_inversor = st.form_submit_button("Salvar Inversor")
-        if submitted_inversor:
+        if st.form_submit_button("Salvar Inversor"):
             if (modelo_i and pot_ca > 0 and vmax_cc > 0 and vstart > 0 and
                 imax_mppt > 0 and num_mppt > 0):
                 novo_inversor_data = {
@@ -267,24 +277,28 @@ with col1:
     if st.button("Buscar Coordenadas"):
         search_coordinates(location_name)
 
-    
+if st.session_state["search_lat"] is not None and st.session_state["search_lon"] is not None:
+    st.button(
+        f"Aplicar Coordenadas Encontradas: Lat={st.session_state['search_lat']:.5f}, "
+        f"Lon={st.session_state['search_lon']:.5f}",
+        on_click=apply_coordinates
+    )
 
 with col2:
     latitude = st.number_input(
         "Latitude (°)",
         value=st.session_state["latitude"],
-        format="%.6f",
+        format="%.5f",
         key="latitude_input",
         help="Latitude do local de instalação."
     )
     longitude = st.number_input(
         "Longitude (°)",
         value=st.session_state["longitude"],
-        format="%.6f",
+        format="%.5f",
         key="longitude_input",
         help="Longitude do local de instalação."
     )
-    # Mantém sessão sincronizada
     st.session_state["latitude"] = latitude
     st.session_state["longitude"] = longitude
 
@@ -292,59 +306,50 @@ col3, col4 = st.columns(2)
 with col3:
     azimuth = st.selectbox(
         "Azimuth (°)",
-        options=[0, 90, 180, 270],
-        index=2,  # 180 padrão
+        options=list(range(0, 360, 15)),
+        index=12,  # 180 padrão
         help="0°=Norte, 90°=Leste, 180°=Sul, 270°=Oeste."
     )
 with col4:
-    tilt_sugerido = abs(_to_float(latitude, 0.0))
+    tilt_sugerido = abs(latitude)
     tilt = st.number_input(
         f"Tilt (Inclinação) Sugerido: {tilt_sugerido:.2f}°",
-        value=tilt_sugerido,
+        value=float(tilt_sugerido),
+        min_value=0.0,
+        max_value=90.0,
+        step=0.5,
         format="%.2f",
         help="Inclinação dos painéis (sugestão = latitude)."
     )
 
 st.markdown("---")
 
-# =========================================================
-# Diagnóstico PVWatts (útil quando aplica localização)
-# =========================================================
-with st.expander("🔎 Diagnóstico PVWatts"):
-    diag_lat  = _clamp(latitude,  -90.0,  90.0)
-    diag_lon  = _clamp(longitude, -180.0, 180.0)
-    diag_tilt = _clamp(tilt,        0.0,  90.0)
-    diag_az   = int(_clamp(azimuth, 0.0, 359.0))
-    st.write({
-        "lat": diag_lat,
-        "lon": diag_lon,
-        "tilt": diag_tilt,
-        "azimuth": diag_az,
-        "api_key_set": bool(os.environ.get("PVWATTS_API_KEY")),
-    })
+# Diagnóstico opcional
+with st.expander("🔧 Diagnóstico (opcional)"):
+    try:
+        st.write("Assinatura realizar_dimensionamento_completo:", str(inspect.signature(realizar_dimensionamento_completo)))
+    except Exception as e:
+        st.write("Não foi possível inspecionar a assinatura:", e)
 
 # =========================================================
-# BOTÃO: CALCULAR
+# BOTÃO
 # =========================================================
 if st.button("Realizar Dimensionamento Completo"):
     if consumo_medio_mensal <= 0:
         st.error("O consumo médio mensal deve ser maior que zero.")
         st.stop()
 
-    # força tipos válidos e faixas para enviar à PVWatts
-    lat  = _clamp(latitude,  -90.0,  90.0)
-    lon  = _clamp(longitude, -180.0, 180.0)
-    tit  = _clamp(tilt,        0.0,  90.0)
-    azim = int(_clamp(azimuth, 0.0, 359.0))
+    if df_paineis.empty or df_inversores.empty:
+        st.warning("Base de equipamentos vazia. Se a função carregar internamente, ignore este aviso.")
 
     with st.spinner("Calculando potência de pico e dimensionando o sistema..."):
         try:
-            resultados_df, erro = realizar_dimensionamento_completo(
-                consumo_medio_mensal,
-                lat,
-                lon,
-                azim,
-                tit,
+            resultados_df, erro = chamar_dimensionamento_seguro(
+                latitude=latitude,
+                longitude=longitude,
+                azimuth=azimuth,
+                tilt=tilt,
+                consumo_medio_mensal=consumo_medio_mensal,
             )
         except Exception as e:
             import sys, traceback
@@ -364,35 +369,21 @@ if st.button("Realizar Dimensionamento Completo"):
         st.header("2. Resultados do Dimensionamento")
         st.subheader("2.1. Resumo de Geração")
 
-        try:
-            potencia_pico_necessaria_kw = resultados_df["potencia_pico_necessaria_kw"].iloc[0]
-            consumo_anual_kwh = resultados_df["consumo_anual_kwh"].iloc[0]
-            energia_gerada_anual_kwh = resultados_df["energia_gerada_anual_kwh"].iloc[0]
-        except Exception:
-            potencia_pico_necessaria_kw = resultados_df.get("potencia_pico_necessaria_kw", pd.Series([0])).iloc[0]
-            consumo_anual_kwh = resultados_df.get("consumo_anual_kwh", pd.Series([consumo_medio_mensal*12])).iloc[0]
-            energia_gerada_anual_kwh = resultados_df.get("energia_gerada_anual_kwh", pd.Series([0])).iloc[0]
+        potencia_pico_necessaria_kw = resultados_df.get("potencia_pico_necessaria_kw", pd.Series([None])).iloc[0]
+        consumo_anual_kwh = resultados_df.get("consumo_anual_kwh", pd.Series([consumo_medio_mensal*12])).iloc[0]
+        energia_gerada_anual_kwh = resultados_df.get("energia_gerada_anual_kwh", pd.Series([None])).iloc[0]
 
         col_resumo1, col_resumo2, col_resumo3 = st.columns(3)
         with col_resumo1:
-            st.metric(
-                "Consumo Anual Alvo (kWh)",
-                f"{consumo_anual_kwh:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            )
+            st.metric("Consumo Anual Alvo (kWh)", fmt_num(consumo_anual_kwh, 2))
         with col_resumo2:
-            st.metric(
-                "Potência de Pico Necessária (kWp)",
-                f"{potencia_pico_necessaria_kw:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            )
+            st.metric("Potência de Pico Necessária (kWp)", fmt_num(potencia_pico_necessaria_kw, 2))
         with col_resumo3:
-            st.metric(
-                "Energia Anual Estimada (kWh)",
-                f"{energia_gerada_anual_kwh:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            )
+            st.metric("Energia Anual Estimada (kWh)", fmt_num(energia_gerada_anual_kwh, 2))
 
         st.markdown("---")
 
-        # TABELA DE OPÇÕES
+        # TABELA
         st.subheader("2.2. Opções de Dimensionamento (Inversor e Arranjo)")
         colunas_esperadas = [
             "inversor_modelo", "inversor_fabricante", "inversor_num_unidades",
@@ -420,18 +411,18 @@ if st.button("Realizar Dimensionamento Completo"):
 
         if "Painel (Potência Wp)" in df_display.columns:
             df_display["Painel (Potência Wp)"] = df_display["Painel (Potência Wp)"].apply(
-                lambda x: f"{x:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                lambda x: fmt_num(x, 0)
             )
         if "Potência Total do Sistema (Wp)" in df_display.columns:
             df_display["Potência Total do Sistema (Wp)"] = df_display["Potência Total do Sistema (Wp)"].apply(
-                lambda x: f"{x:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                lambda x: fmt_num(x, 0)
             )
 
         st.dataframe(df_display, use_container_width=True)
 
         st.markdown("""
         <div style='color: white; font-size: small;'>
-        <strong>Explicação da Tabela:</strong> Cada linha representa uma opção de dimensionamento válida. 
+        <strong>Explicação da Tabela:</strong> Cada linha representa uma opção de dimensionamento válida.
         A coluna 'Potência Total do Sistema (Wp)' indica a potência real instalada, que deve ser próxima da 'Potência de Pico Necessária'.
         O arranjo é detalhado por MPPT (Maximum Power Point Tracker) do inversor.
         </div>
@@ -442,24 +433,19 @@ if st.button("Realizar Dimensionamento Completo"):
         # DETALHES TÉCNICOS
         st.subheader("2.3. Detalhes Técnicos do Melhor Arranjo")
         melhor_arranjo = resultados_df.iloc[0]
-        def fmt_int(x):
-            try:
-                return f"{x:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            except Exception:
-                return str(x)
 
         st.markdown(f"""
         <div style='background-color: #004080; padding: 15px; border-radius: 10px;'>
         <strong>Melhor Opção Selecionada:</strong><br><br>
         - <strong>Inversor:</strong> {melhor_arranjo.get('inversor_modelo', '')} ({melhor_arranjo.get('inversor_fabricante','')})<br>
         - <strong>Quantidade de Inversores:</strong> {melhor_arranjo.get('inversor_num_unidades','')}<br>
-        - <strong>Painel:</strong> {melhor_arranjo.get('painel_modelo','')} ({melhor_arranjo.get('painel_fabricante','')}) - {fmt_int(melhor_arranjo.get('painel_potencia',0))} Wp<br><br>
+        - <strong>Painel:</strong> {melhor_arranjo.get('painel_modelo','')} ({melhor_arranjo.get('painel_fabricante','')}) - {fmt_num(melhor_arranjo.get('painel_potencia',0),0)} Wp<br><br>
         <strong>Detalhes do Arranjo (por MPPT):</strong><br>
         - <strong>Módulos em Série:</strong> {melhor_arranjo.get('arranjo_modulos_serie','')}<br>
         - <strong>Conjuntos em Paralelo:</strong> {melhor_arranjo.get('arranjo_conjuntos_paralelo_por_mppt','')}<br>
-        - <strong>Potência do Arranjo (por MPPT):</strong> {fmt_int(melhor_arranjo.get('arranjo_potencia_total_mppt_w',0))} Wp<br><br>
+        - <strong>Potência do Arranjo (por MPPT):</strong> {fmt_num(melhor_arranjo.get('arranjo_potencia_total_mppt_w',0),0)} Wp<br><br>
         <strong>Sistema Total:</strong><br>
-        - <strong>Potência Total Instalada:</strong> {fmt_int(melhor_arranjo.get('sistema_potencia_total_w',0))} Wp<br>
+        - <strong>Potência Total Instalada:</strong> {fmt_num(melhor_arranjo.get('sistema_potencia_total_w',0),0)} Wp<br>
         - <strong>Total de Painéis:</strong> {melhor_arranjo.get('sistema_num_total_paineis','')}<br>
         </div>
         """, unsafe_allow_html=True)
@@ -476,7 +462,7 @@ st.markdown("""
 Este aplicativo integra duas etapas cruciais do dimensionamento fotovoltaico:
 
 1. **Cálculo de Geração (PVWatts):**
-   - Usa a API PVWatts (NREL) para estimar a produção de energia.
+   - Usa a API PVWatts (NREL) com `dataset='intl'` para estimar a produção fora dos EUA.
    - A partir de **Consumo Médio Mensal** e **Latitude/Longitude/Azimuth/Tilt**, calcula a **Potência de Pico Necessária (kWp)**.
 
 2. **Seleção de Inversor e Arranjo:**
