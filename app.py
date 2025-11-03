@@ -103,60 +103,94 @@ def search_coordinates(location_name: str):
 
 def chamar_dimensionamento_seguro(**contexto):
     """
-    Chama realizar_dimensionamento_completo filtrando somente os parâmetros aceitos.
-    - Se a função aceitar **kwargs, passamos apenas os que existem na assinatura.
-    - Se não aceitar **kwargs, tentamos posição na ordem (latitude, longitude, azimuth, tilt) se existirem.
-    - Normaliza retorno para (df, erro).
+    Chama realizar_dimensionamento_completo mapeando valores por NOME EXATO da assinatura.
+    - Para cada parâmetro da função, tentamos achar um valor no contexto usando aliases.
+    - Montamos **kwargs com nomes EXATOS aceitos pela função e *args* apenas para positional-only.
+    - Normalizamos o retorno para (df, erro).
     """
+    import inspect
     sig = inspect.signature(realizar_dimensionamento_completo)
     params = sig.parameters
 
-    # Candidatos disponíveis no app; alguns nomes alternativos incluídos por segurança
-    candidatos = {
+    # Valores disponíveis do app (e derivados)
+    candidatos_base = {
         "latitude": contexto.get("latitude"),
         "longitude": contexto.get("longitude"),
         "azimuth": contexto.get("azimuth"),
         "tilt": contexto.get("tilt"),
-
         "consumo_medio_mensal": contexto.get("consumo_medio_mensal"),
-        "consumo_mensal_kwh": contexto.get("consumo_medio_mensal"),  # alias
+        "consumo_mensal_kwh": contexto.get("consumo_medio_mensal"),
         "consumo_anual_kwh": (
             (contexto.get("consumo_medio_mensal") or 0) * 12
-            if contexto.get("consumo_medio_mensal") is not None
-            else None
+            if contexto.get("consumo_medio_mensal") is not None else None
         ),
-
         "arquivo_equipamentos": contexto.get("FILE_PATH_EQUIPAMENTOS"),
         "df_paineis": contexto.get("df_paineis"),
         "df_inversores": contexto.get("df_inversores"),
-
         "api_key": contexto.get("api_key"),
         "perdas_percentuais": contexto.get("perdas_percentuais"),
     }
 
-    # Filtra somente os parâmetros que a função REALMENTE aceita e que não são None
-    kwargs_filtrados = {k: v for k, v in candidatos.items() if k in params and v is not None}
+    # Aliases para casar nomes diferentes
+    alias_map = {
+        "latitude": ["latitude", "lat", "phi", "y"],
+        "longitude": ["longitude", "lon", "lng", "lambda", "x"],
+        "azimuth": ["azimuth", "azim", "az", "azimuth_graus", "orientacao"],
+        "tilt": ["tilt", "inclinacao", "slope", "beta"],
+        "consumo_medio_mensal": ["consumo_medio_mensal", "consumo_mensal_kwh"],
+        "consumo_anual_kwh": ["consumo_anual_kwh"],
+        "arquivo_equipamentos": ["arquivo_equipamentos", "file_path_equipamentos"],
+        "df_paineis": ["df_paineis"],
+        "df_inversores": ["df_inversores"],
+        "api_key": ["api_key", "apikey", "pvwatts_api_key"],
+        "perdas_percentuais": ["perdas_percentuais", "losses", "perdas"],
+    }
 
+    def obter_valor_por_alias(nome_param):
+        # tenta nome exato primeiro
+        if nome_param in candidatos_base and candidatos_base[nome_param] is not None:
+            return candidatos_base[nome_param]
+        # tenta aliases conhecidos
+        for k, aliases in alias_map.items():
+            if nome_param == k:
+                for alias in aliases:
+                    val = candidatos_base.get(alias)
+                    if val is not None:
+                        return val
+        # fallback: se o próprio nome_param existir em candidatos_base
+        return candidatos_base.get(nome_param)
+
+    args = []
+    kwargs = {}
+
+    for nome, p in params.items():
+        val = obter_valor_por_alias(nome)
+
+        if p.kind == inspect.Parameter.POSITIONAL_ONLY:
+            # precisa ir por posição
+            if val is None and p.default is inspect._empty:
+                raise TypeError(f"Parâmetro obrigatório '{nome}' não fornecido.")
+            args.append(val)
+        elif p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            # pode ir como keyword com o NOME EXATO da assinatura
+            if val is not None:
+                kwargs[nome] = val
+            elif p.default is inspect._empty:
+                # obrigatório sem valor
+                raise TypeError(f"Parâmetro obrigatório '{nome}' não fornecido.")
+        elif p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            # *args ou **kwargs da função — não precisamos alimentar explicitamente aqui
+            pass
+
+    # Chamada final: prioriza keywords com nomes exatos + eventuais args positional-only
     try:
-        aceita_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-        if aceita_kwargs:
-            resultado = realizar_dimensionamento_completo(**kwargs_filtrados)
-        else:
-            # Tenta posicionais na ordem mais comum
-            nomes = list(params.keys())
-            ordem_padrao = ["latitude", "longitude", "azimuth", "tilt"]
-            args = []
-            for nome in ordem_padrao:
-                if nome in nomes:
-                    args.append(candidatos.get(nome))
-            # Remove Nones do final (evita passar a menos por engano)
-            while args and args[-1] is None:
-                args.pop()
-            resultado = realizar_dimensionamento_completo(*args)
+        resultado = realizar_dimensionamento_completo(*args, **kwargs)
     except TypeError as e:
-        raise TypeError(f"Parâmetros incompatíveis: {e}")
+        # Mostra exatamente como chamamos (ajuda no debug)
+        raise TypeError(f"Parâmetros incompatíveis ao chamar realizar_dimensionamento_completo "
+                        f"com args={args} e kwargs={kwargs}: {e}")
 
-    # Normaliza o retorno
+    # Normaliza retorno para (df, erro)
     if isinstance(resultado, tuple) and len(resultado) == 2:
         df, erro = resultado
     else:
