@@ -409,7 +409,7 @@ if st.button("Realizar Dimensionamento Completo"):
                 df_paineis=df_paineis,
                 df_inversores=df_inversores,
                 FILE_PATH_EQUIPAMENTOS=FILE_PATH_EQUIPAMENTOS,
-                # api_key=st.secrets.get("PVWATTS_API_KEY"),
+                api_key=st.secrets.get("PVWATTS_API_KEY"),
                 # perdas_percentuais=0.14,
             )
         except Exception as e:
