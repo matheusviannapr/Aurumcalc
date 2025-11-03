@@ -1,12 +1,6 @@
 import streamlit as st
 import pandas as pd
-from pv_calculator import (
-    realizar_dimensionamento_completo, 
-    carregar_dados_equipamentos, 
-    geocode_location,
-    salvar_novo_painel,
-    salvar_novo_inversor
-)
+from pv_calculator import realizar_dimensionamento_completo, carregar_dados_equipamentos, geocode_location, salvar_novo_painel, salvar_novo_inversor
 
 # --- Configurações da Página ---
 st.set_page_config(
