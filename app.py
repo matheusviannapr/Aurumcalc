@@ -217,8 +217,8 @@ with st.sidebar.expander("➕ Inserir Novo Equipamento"):
                     "tensao_nominal": v_nom,
                     "faixa_tensao_mpp": faixa_mpp,
                     "numero_mpp_trackers": num_mppt,
-                    "corrente_maxima_entrada_por_mpp_tracker": imax_mppt,
-                    "corrente_maxima_curto_circuito_por_mpp_tracker": isc_mppt,
+                    "corrente_maxima_entrada_por_mppt_tracker": imax_mppt,
+                    "corrente_maxima_curto_circuito_por_mppt_tracker": isc_mppt,
                     "maxima_potencia_nominal_ca": pot_ca,
                     "potencia_maxima_aparente_ca": pot_ap_ca,
                     "tensao_nominal_ca": v_nom_ca,
@@ -333,7 +333,7 @@ if st.button("Realizar Dimensionamento Completo"):
 
     with st.spinner("Calculando potência de pico e dimensionando o sistema..."):
         try:
-            # A assinatura padrão esperada:
+            # Assinatura esperada:
             # realizar_dimensionamento_completo(consumo_medio_mensal, latitude, longitude, azimuth, tilt)
             resultados_df, erro = realizar_dimensionamento_completo(
                 consumo_medio_mensal, lat_val, lon_val, int(azimuth), float(tilt)
@@ -464,44 +464,76 @@ if st.button("Realizar Dimensionamento Completo"):
             st.dataframe(resultados_df, use_container_width=True)
 
         # =========================================================
-        # MEMÓRIA DE CÁLCULO (LaTeX) — botão de download
+        # MEMÓRIA DE CÁLCULO (LaTeX) — agora lendo o arquivo gerado
         # =========================================================
         if BUILD_TEX:
             try:
                 ac_monthly = melhor_arranjo.get("energia_mensal_kwh_array")
+
+                # Monta um payload tolerante (a função aceita DataFrame/dict/list[dict])
                 payload = {
                     "projeto": "Dimensionamento FV — IME",
-                    "consumo_mensal_kwh": consumo_medio_mensal,
+                    "cliente": "Instituto Militar de Engenharia",
+                    "local": "Rio de Janeiro, RJ",
                     "consumo_anual_kwh": consumo_medio_mensal * 12,
-                    "latitude": lat_val,
-                    "longitude": lon_val,
-                    "azimuth": int(azimuth),
-                    "tilt": float(tilt),
                     "potencia_pico_necessaria_kw": melhor_arranjo.get("potencia_pico_necessaria_kw"),
                     "energia_gerada_anual_kwh": melhor_arranjo.get("energia_gerada_anual_kwh"),
-                    "ac_monthly": ac_monthly,  # pode ser None, o gerador lida
-
+                    "energia_mensal_kwh_array": ac_monthly,  # pode ser None
                     "inversor_modelo": melhor_arranjo.get("inversor_modelo"),
                     "inversor_fabricante": melhor_arranjo.get("inversor_fabricante"),
                     "inversor_num_unidades": melhor_arranjo.get("inversor_num_unidades"),
                     "inversor_num_mppt": melhor_arranjo.get("inversor_num_mppt"),
-
                     "painel_modelo": melhor_arranjo.get("painel_modelo"),
                     "painel_fabricante": melhor_arranjo.get("painel_fabricante"),
-                    "painel_potencia_w": melhor_arranjo.get("painel_potencia"),
-
+                    "painel_potencia": melhor_arranjo.get("painel_potencia"),
                     "arranjo_modulos_serie": melhor_arranjo.get("arranjo_modulos_serie"),
                     "arranjo_conjuntos_paralelo_por_mppt": melhor_arranjo.get("arranjo_conjuntos_paralelo_por_mppt"),
                     "sistema_num_total_paineis": melhor_arranjo.get("sistema_num_total_paineis"),
                     "sistema_potencia_total_w": melhor_arranjo.get("sistema_potencia_total_w"),
+                    "consumo_mensal_kwh": consumo_medio_mensal,
+                    # meta-dados de sítio
+                    "latitude": lat_val,
+                    "longitude": lon_val,
+                    "azimuth": int(azimuth),
+                    "tilt": float(tilt),
                 }
-                tex_str = gerar_memoria_calculo_latex(payload)
-                st.download_button(
-                    label="📄 Baixar Memória de Cálculo (LaTeX)",
-                    data=tex_str,
-                    file_name="memoria_calculo.tex",
-                    mime="text/plain",
+
+                # 1) Gera o arquivo .tex e recebe o CAMINHO
+                caminho_tex = gerar_memoria_calculo_latex(
+                    resultados_df=payload,
+                    caminho_tex="memoria_calculo.tex",
+                    projeto="Dimensionamento FV — IME",
+                    cliente="Instituto Militar de Engenharia",
+                    local="Rio de Janeiro, RJ",
+                    latitude=lat_val,
+                    longitude=lon_val,
+                    azimuth=int(azimuth),
+                    tilt=float(tilt),
+                    observacoes="Documento gerado automaticamente pelo aplicativo.",
                 )
+
+                # 2) Lê o conteúdo do .tex para enviar no download_button
+                try:
+                    with open(caminho_tex, "r", encoding="utf-8") as f:
+                        tex_str = f.read()
+                except Exception as e_read:
+                    # Fallback: se por algum motivo não conseguiu ler, mostra aviso
+                    st.warning(f"Memória gerada, mas não foi possível ler o arquivo: {e_read}")
+                    tex_str = ""
+
+                if tex_str:
+                    st.subheader("📄 Pré-visualização da Memória de Cálculo (LaTeX)")
+                    st.code(tex_str, language="latex")
+
+                    st.download_button(
+                        label="⬇️ Baixar Memória de Cálculo (.tex)",
+                        data=tex_str,
+                        file_name="memoria_calculo.tex",
+                        mime="application/x-latex",
+                    )
+                else:
+                    st.warning("Memória de cálculo foi gerada, mas o conteúdo está vazio.")
+
             except Exception as e:
                 st.warning(f"Não foi possível gerar a memória de cálculo LaTeX: {e}")
         else:
