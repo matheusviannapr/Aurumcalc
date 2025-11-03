@@ -259,6 +259,9 @@ st.markdown("---")
 # =========================================================
 # INPUTS
 # =========================================================
+# =========================================================
+# INPUTS
+# =========================================================
 st.header("1. Dados de Geração (PVWatts)")
 col1, col2 = st.columns(2)
 
@@ -277,24 +280,49 @@ with col1:
     if st.button("Buscar Coordenadas"):
         search_coordinates(location_name)
 
-if st.session_state["search_lat"] is not None and st.session_state["search_lon"] is not None:
-    st.button(
-        f"Aplicar Coordenadas Encontradas: Lat={st.session_state['search_lat']:.5f}, "
-        f"Lon={st.session_state['search_lon']:.5f}",
-        on_click=apply_coordinates
-    )
+# Só mostra o botão se realmente temos floats válidos
+if (
+    st.session_state.get("search_lat") is not None
+    and st.session_state.get("search_lon") is not None
+):
+    try:
+        _lat_lbl = float(st.session_state["search_lat"])
+        _lon_lbl = float(st.session_state["search_lon"])
+        st.button(
+            f"Aplicar Coordenadas Encontradas: Lat={_lat_lbl:.5f}, Lon={_lon_lbl:.5f}",
+            on_click=apply_coordinates
+        )
+    except (TypeError, ValueError):
+        # Se por algum motivo não forem numéricos, mostra sem formatação
+        st.button(
+            "Aplicar Coordenadas Encontradas",
+            on_click=apply_coordinates
+        )
 
 with col2:
+    # Garante valores numéricos de fallback para os inputs
+    _lat_default = st.session_state.get("latitude")
+    try:
+        _lat_default = float(_lat_default)
+    except (TypeError, ValueError):
+        _lat_default = -20.46
+
+    _lon_default = st.session_state.get("longitude")
+    try:
+        _lon_default = float(_lon_default)
+    except (TypeError, ValueError):
+        _lon_default = -54.62
+
     latitude = st.number_input(
         "Latitude (°)",
-        value=st.session_state["latitude"],
+        value=_lat_default,
         format="%.5f",
         key="latitude_input",
         help="Latitude do local de instalação."
     )
     longitude = st.number_input(
         "Longitude (°)",
-        value=st.session_state["longitude"],
+        value=_lon_default,
         format="%.5f",
         key="longitude_input",
         help="Longitude do local de instalação."
@@ -310,11 +338,19 @@ with col3:
         index=12,  # 180 padrão
         help="0°=Norte, 90°=Leste, 180°=Sul, 270°=Oeste."
     )
+
 with col4:
-    tilt_sugerido = abs(latitude)
+    # Blindagem contra None/strings
+    try:
+        _lat_for_tilt = float(latitude)
+    except (TypeError, ValueError):
+        _lat_for_tilt = 0.0
+    tilt_sugerido = abs(_lat_for_tilt)
+
+    # Usa label segura (tilt_sugerido é sempre float aqui)
     tilt = st.number_input(
         f"Tilt (Inclinação) Sugerido: {tilt_sugerido:.2f}°",
-        value=float(tilt_sugerido),
+        value=float(min(max(tilt_sugerido, 0.0), 90.0)),
         min_value=0.0,
         max_value=90.0,
         step=0.5,
