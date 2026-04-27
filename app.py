@@ -3,8 +3,11 @@ import os
 import sys
 import traceback
 import inspect
+import json
+from pathlib import Path
 import pandas as pd
 import streamlit as st
+import numpy as np
 
 # --- Se existir segredo, propaga para variável de ambiente usada no pv_calculator ---
 if "PVWATTS_API_KEY" in st.secrets:
@@ -17,6 +20,22 @@ from pv_calculator import (
     geocode_location,
     salvar_novo_painel,
     salvar_novo_inversor,
+    calcular_geracao_horaria_pvwatts,
+)
+from hourly_analysis import (
+    BillingGroupAInput,
+    BillingGroupBInput,
+    list_profiles_by_sector,
+    load_profile,
+    calibrate_load_profile,
+    classify_tariff_periods,
+    month_hour_index,
+    calculate_hourly_energy_balance,
+    split_by_tariff_period,
+    compute_economic_summary,
+    simulate_load_shifting,
+    simulate_peak_shaving,
+    calculate_area_limited_pv,
 )
 
 # --- Import opcional do gerador de LaTeX da memória de cálculo ---
@@ -58,6 +77,7 @@ st.markdown(custom_css, unsafe_allow_html=True)
 # VARIÁVEIS GLOBAIS
 # =========================================================
 FILE_PATH_EQUIPAMENTOS = "BDFotovoltaica.xlsx"
+LOAD_PROFILE_INDEX = Path("data/load_profiles/profiles_index.json")
 
 # =========================================================
 # SESSION STATE (defaults)
@@ -70,6 +90,10 @@ if "search_lat" not in st.session_state:
     st.session_state["search_lat"] = None
 if "search_lon" not in st.session_state:
     st.session_state["search_lon"] = None
+if "fit_result" not in st.session_state:
+    st.session_state["fit_result"] = None
+if "fit_meta" not in st.session_state:
+    st.session_state["fit_meta"] = None
 
 # =========================================================
 # FUNÇÕES AUXILIARES
@@ -89,6 +113,80 @@ def load_data():
     except Exception as e:
         st.error(f"Erro ao carregar {FILE_PATH_EQUIPAMENTOS}: {e}")
         return pd.DataFrame(), pd.DataFrame()
+
+
+def get_equipment_session_data():
+    """
+    Mantém os dados de equipamentos em sessão para evitar perda visual após inclusão.
+    """
+    if "df_paineis" not in st.session_state or "df_inversores" not in st.session_state:
+        df_p, df_i = load_data()
+        st.session_state["df_paineis"] = df_p
+        st.session_state["df_inversores"] = df_i
+    return st.session_state["df_paineis"], st.session_state["df_inversores"]
+
+
+def refresh_equipment_session_data():
+    df_p, df_i = load_data()
+    st.session_state["df_paineis"] = df_p
+    st.session_state["df_inversores"] = df_i
+
+
+def add_custom_standard_curve_json(
+    profile_name: str,
+    setor: str,
+    subtipo: str,
+    hourly_values_text: str,
+):
+    """
+    Facilita inclusão de curva padrão via sessão/UI.
+    Aceita vetor de 24 ou 8760 valores em JSON.
+    """
+    if not profile_name.strip():
+        raise ValueError("Informe um nome para a curva.")
+
+    values = json.loads(hourly_values_text)
+    if not isinstance(values, list) or len(values) not in (24, 8760):
+        raise ValueError("A curva deve ter 24 ou 8760 pontos.")
+
+    profile_id = f"{setor}_{subtipo}_{profile_name}".lower().replace(" ", "_")
+    folder = Path("data/load_profiles") / "custom"
+    folder.mkdir(parents=True, exist_ok=True)
+    file_path = folder / f"{profile_id}.json"
+
+    payload = {
+        "id": profile_id,
+        "nome": profile_name,
+        "setor": setor,
+        "subtipo": subtipo,
+        "pais_origem": "BR",
+        "fonte": "custom_user_import",
+        "resolucao_original": f"{len(values)}h",
+        "resolucao_final": f"{len(values)}h",
+        "ano_climatico_ou_origem": "custom_uploaded",
+        "unidade_original": "normalized",
+        "tipo_perfil": "custom_uploaded",
+        "observacoes": "Curva importada manualmente pelo usuário.",
+        "hourly_vector_normalized": values,
+    }
+    file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    index_data = {"profiles": []}
+    if LOAD_PROFILE_INDEX.exists():
+        index_data = json.loads(LOAD_PROFILE_INDEX.read_text(encoding="utf-8"))
+    profiles = index_data.setdefault("profiles", [])
+    profiles = [p for p in profiles if p.get("id") != profile_id]
+    profiles.append(
+        {
+            "id": profile_id,
+            "setor": setor,
+            "path": f"custom/{file_path.name}",
+            "tipo_perfil": "custom_uploaded",
+            "nome": profile_name,
+        }
+    )
+    index_data["profiles"] = profiles
+    LOAD_PROFILE_INDEX.write_text(json.dumps(index_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def apply_coordinates():
     """Aplica coordenadas encontradas à UI e ao session_state."""
@@ -134,7 +232,7 @@ st.sidebar.markdown("Desenvolvido por **Matheus Vianna**")
 st.sidebar.markdown("[matheusvianna.com](https://matheusvianna.com)")
 st.sidebar.markdown("---")
 
-df_paineis, df_inversores = load_data()
+df_paineis, df_inversores = get_equipment_session_data()
 
 with st.sidebar.expander("Dados de Equipamentos Carregados"):
     st.subheader("Painéis Solares")
@@ -177,7 +275,8 @@ with st.sidebar.expander("➕ Inserir Novo Equipamento"):
                     "eficiencia_modulo": eficiencia
                 }
                 if salvar_novo_painel(novo_painel_data):
-                    st.success(f"Painel '{modelo_p}' salvo com sucesso! Recarregue a página para usar.")
+                    refresh_equipment_session_data()
+                    st.success(f"Painel '{modelo_p}' salvo com sucesso e já disponível na sessão.")
                 else:
                     st.error("Erro ao salvar o painel no arquivo Excel.")
             else:
@@ -228,7 +327,8 @@ with st.sidebar.expander("➕ Inserir Novo Equipamento"):
                     "quantidade_fases_ca": fases_ca
                 }
                 if salvar_novo_inversor(novo_inversor_data):
-                    st.success(f"Inversor '{modelo_i}' salvo com sucesso! Recarregue a página para usar.")
+                    refresh_equipment_session_data()
+                    st.success(f"Inversor '{modelo_i}' salvo com sucesso e já disponível na sessão.")
                 else:
                     st.error("Erro ao salvar o inversor no arquivo Excel.")
             else:
@@ -555,3 +655,213 @@ Este aplicativo integra duas etapas cruciais do dimensionamento fotovoltaico:
    - Define combinações de inversores e arranjos série/paralelo por MPPT respeitando limites elétricos.
    - Retorna opções ordenadas, priorizando a mais próxima da potência alvo.
 """)
+
+st.markdown("---")
+st.header("Análise Horária e Tarifária")
+st.caption("Versão inicial com perfis synthetic_for_testing. Não usar para proposta real sem validação de curva medida.")
+
+col_h1, col_h2 = st.columns(2)
+with col_h1:
+    customer_sector = st.selectbox(
+        "Tipo de cliente",
+        options=[
+            "escola", "supermercado", "frigorifico", "industria", "escritorio",
+            "varejo", "restaurante", "hotel", "hospital", "custom"
+        ],
+        index=0
+    )
+    dias_operacao = st.slider("Dias de funcionamento por semana", 1, 7, 5)
+    horario_operacao = st.slider("Horário de funcionamento", 0, 24, (8, 18))
+with col_h2:
+    grupo = st.radio("Grupo tarifário", options=["A", "B"], horizontal=True)
+    mes_ref = st.text_input("Mês de referência (YYYY-MM)", value="2026-01")
+    dias_ciclo = st.number_input("Dias do ciclo", min_value=1, max_value=31, value=30)
+    ponta_window = st.slider("Janela de ponta (hora início/fim)", 0, 24, (18, 21))
+
+profiles = list_profiles_by_sector(customer_sector)
+profile_ids = [p["id"] for p in profiles]
+profile_choice = st.selectbox("Perfil base", options=profile_ids if profile_ids else ["sem_perfil"])
+
+with st.expander("➕ Incluir curva padrão personalizada (sessão de perfis)"):
+    st.caption("Cole um JSON com 24 ou 8760 valores normalizados. Exemplo: [0.04, 0.04, ...]")
+    with st.form("form_add_curve", clear_on_submit=True):
+        curve_name = st.text_input("Nome da curva")
+        curve_setor = st.selectbox(
+            "Setor da curva",
+            options=[
+                "escola", "supermercado", "frigorifico", "industria", "escritorio",
+                "varejo", "restaurante", "hotel", "hospital", "custom"
+            ],
+            index=9
+        )
+        curve_subtipo = st.text_input("Subtipo", value="custom")
+        curve_json = st.text_area(
+            "Vetor horário (JSON)",
+            value="[0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667, 0.0416667]",
+            height=120,
+        )
+        submitted_curve = st.form_submit_button("Salvar curva padrão")
+        if submitted_curve:
+            try:
+                add_custom_standard_curve_json(curve_name, curve_setor, curve_subtipo, curve_json)
+                st.success("Curva padrão salva com sucesso. Reabra o seletor para visualizar o novo perfil.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Não foi possível salvar a curva: {e}")
+
+if grupo == "A":
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        energia_ponta = st.number_input("Energia ponta (kWh)", min_value=0.0, value=1000.0, step=10.0)
+        demanda_ponta = st.number_input("Demanda ponta (kW)", min_value=0.0, value=120.0, step=1.0)
+        tarifa_ponta = st.number_input("Tarifa energia ponta (R$/kWh)", min_value=0.0, value=1.2, step=0.01)
+    with c2:
+        energia_fora = st.number_input("Energia fora ponta (kWh)", min_value=0.0, value=4000.0, step=10.0)
+        demanda_fora = st.number_input("Demanda fora ponta (kW)", min_value=0.0, value=90.0, step=1.0)
+        tarifa_fora = st.number_input("Tarifa energia fora ponta (R$/kWh)", min_value=0.0, value=0.7, step=0.01)
+    with c3:
+        tarifa_dem_p = st.number_input("Tarifa demanda ponta (R$/kW)", min_value=0.0, value=30.0, step=0.1)
+        tarifa_dem_f = st.number_input("Tarifa demanda fora ponta (R$/kW)", min_value=0.0, value=20.0, step=0.1)
+
+    billing_obj = BillingGroupAInput(
+        concessionaria="N/A", modalidade_tarifaria="verde", subgrupo="A4", mes_referencia=mes_ref,
+        dias_ciclo=int(dias_ciclo), ponta_inicio_hora=ponta_window[0], ponta_fim_hora=ponta_window[1],
+        feriados_nacionais=[], energia_ponta_kwh=energia_ponta, energia_fora_ponta_kwh=energia_fora,
+        demanda_medida_ponta_kw=demanda_ponta, demanda_medida_fora_ponta_kw=demanda_fora,
+        tarifa_energia_ponta=tarifa_ponta, tarifa_energia_fora_ponta=tarifa_fora,
+        tarifa_demanda_ponta=tarifa_dem_p, tarifa_demanda_fora_ponta=tarifa_dem_f,
+    )
+else:
+    c1, c2 = st.columns(2)
+    with c1:
+        energia_total_b = st.number_input("Energia total (kWh)", min_value=0.0, value=5000.0, step=10.0)
+        energia_ponta_b = st.number_input("Energia ponta (branca, opcional)", min_value=0.0, value=0.0, step=10.0)
+        energia_fora_b = st.number_input("Energia fora ponta (branca, opcional)", min_value=0.0, value=0.0, step=10.0)
+    with c2:
+        tarifa_energia_b = st.number_input("Tarifa energia (R$/kWh)", min_value=0.0, value=0.8, step=0.01)
+        tarifa_ponta_b = st.number_input("Tarifa ponta (branca)", min_value=0.0, value=1.3, step=0.01)
+        tarifa_fora_b = st.number_input("Tarifa fora ponta (branca)", min_value=0.0, value=0.6, step=0.01)
+    billing_obj = BillingGroupBInput(
+        concessionaria="N/A", modalidade="convencional", mes_referencia=mes_ref, dias_ciclo=int(dias_ciclo),
+        energia_total_kwh=energia_total_b, energia_ponta_kwh=energia_ponta_b or None, energia_fora_ponta_kwh=energia_fora_b or None,
+        tarifa_energia=tarifa_energia_b, tarifa_energia_ponta=tarifa_ponta_b, tarifa_energia_fora_ponta=tarifa_fora_b,
+    )
+
+col_fit, col_calc = st.columns(2)
+with col_fit:
+    run_fit = st.button("1) Calibrar curva (FIT)")
+with col_calc:
+    run_sizing = st.button("2) Calcular sistema com base no FIT + conta")
+
+if run_fit:
+    try:
+        selected_meta = next((p for p in profiles if p["id"] == profile_choice), None)
+        if not selected_meta:
+            st.error("Nenhum perfil disponível para o setor.")
+        else:
+            candidate = load_profile(selected_meta["path"])
+            calibration = calibrate_load_profile(
+                candidate_profiles=[candidate],
+                billing_data=billing_obj,
+                customer_type=customer_sector,
+                dias_funcionamento_semana=dias_operacao,
+                horario_funcionamento=horario_operacao,
+            )
+            st.session_state["fit_result"] = calibration
+            st.session_state["fit_meta"] = {
+                "mes_ref": mes_ref,
+                "dias_ciclo": int(dias_ciclo),
+                "ponta_window": ponta_window,
+                "grupo": grupo,
+            }
+            st.success(f"FIT concluído: {calibration.perfil_escolhido_id} | fator: {calibration.fator_aplicado:.4f}")
+            if calibration.alertas:
+                for alert in calibration.alertas:
+                    st.warning(alert)
+    except Exception as e:
+        st.error(f"Falha na calibração (FIT): {e}")
+
+fit_result = st.session_state.get("fit_result")
+fit_meta = st.session_state.get("fit_meta")
+
+if fit_result is not None:
+    st.info("FIT disponível em sessão. Agora você pode calcular o sistema com base na conta + FIT.")
+    fit_chart = pd.DataFrame({"carga_fit_kw": fit_result.curva_calibrada_kw[:168]})
+    st.line_chart(fit_chart)
+
+if run_sizing:
+    try:
+        if fit_result is None or fit_meta is None:
+            st.error("Execute primeiro o passo 1 (Calibrar curva / FIT).")
+        else:
+            idx = month_hour_index(fit_meta["mes_ref"], int(fit_meta["dias_ciclo"]))
+            periods = classify_tariff_periods(idx, fit_meta["ponta_window"][0], fit_meta["ponta_window"][1], [])
+
+            target_monthly_kwh = float(np.sum(fit_result.curva_calibrada_kw))
+            if isinstance(billing_obj, BillingGroupAInput):
+                billed_total = (billing_obj.energia_ponta_kwh or 0.0) + (billing_obj.energia_fora_ponta_kwh or 0.0)
+            else:
+                billed_total = billing_obj.energia_total_kwh or target_monthly_kwh
+            target_monthly_kwh = billed_total if billed_total > 0 else target_monthly_kwh
+
+            pv_per_kwp = calcular_geracao_horaria_pvwatts(
+                potencia_dc_kwp=1.0, latitude=latitude, longitude=longitude, azimuth=int(azimuth), tilt=float(tilt)
+            ) or [0.0] * len(idx)
+            pv_per_kwp_month = float(np.sum(np.asarray(pv_per_kwp[: len(idx)], dtype=float)))
+
+            if pv_per_kwp_month <= 0:
+                st.error("Não foi possível obter geração horária PVWatts para calcular o tamanho do sistema.")
+            else:
+                suggested_kwp = target_monthly_kwh / pv_per_kwp_month
+                sizing_factor = st.slider("Fator do sistema sobre alvo (para autoconsumo/limites)", 0.5, 1.3, 1.0, 0.05)
+                system_kwp = max(0.1, suggested_kwp * sizing_factor)
+
+                pv_hourly = calcular_geracao_horaria_pvwatts(
+                    potencia_dc_kwp=system_kwp, latitude=latitude, longitude=longitude, azimuth=int(azimuth), tilt=float(tilt)
+                ) or [0.0] * len(idx)
+                pv_slice = np.asarray(pv_hourly[: len(idx)], dtype=float)
+                balance = calculate_hourly_energy_balance(fit_result.curva_calibrada_kw, pv_slice)
+                split = split_by_tariff_period(balance, periods)
+                econ = compute_economic_summary(split, billing_obj)
+
+                st.subheader("Sistema calculado a partir do FIT + conta")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Potência sugerida (kWp)", fmt_num(system_kwp, 2))
+                c2.metric("Carga mensal alvo (kWh)", fmt_num(target_monthly_kwh, 2))
+                c3.metric("Geração mensal estimada (kWh)", fmt_num(float(np.sum(pv_slice)), 2))
+
+                chart_df = pd.DataFrame({
+                    "carga_fit_kw": fit_result.curva_calibrada_kw[:168],
+                    "pv_kw": pv_slice[:168],
+                    "import_kw": balance["grid_import_kw"].values[:168],
+                })
+                st.line_chart(chart_df)
+
+                st.subheader("Resumo de economia mensal")
+                e1, e2, e3 = st.columns(3)
+                e1.metric("Economia ponta (R$)", fmt_num(econ["economia_energia_ponta"], 2))
+                e2.metric("Economia fora ponta (R$)", fmt_num(econ["economia_energia_fora_ponta"], 2))
+                e3.metric("Economia total mensal (R$)", fmt_num(econ["economia_total_mensal"], 2))
+
+                st.subheader("Área máxima disponível")
+                area_limit = calculate_area_limited_pv(
+                    area_disponivel_m2=100.0, modulo_area_m2=2.3, fator_ocupacao=0.75,
+                    potencia_modulo_w=550.0, potencia_sistema_kwp=system_kwp,
+                )
+                st.json(area_limit)
+
+                ls = simulate_load_shifting(
+                    fit_result.curva_calibrada_kw, periods, percentual_flexivel=0.15,
+                    limite_energia_deslocavel_dia_kwh=30.0, limite_potencia_deslocavel_kw=10.0,
+                )
+                ps = simulate_peak_shaving(
+                    balance["grid_import_kw"].values, demand_target_kw=float(np.percentile(balance["grid_import_kw"], 95)),
+                    battery_power_kw=20.0, battery_capacity_kwh=60.0,
+                )
+                with st.expander("Resultados load shifting e peak shaving"):
+                    st.write("Load shifting (energia antes/depois):", ls["energia_total_antes"], ls["energia_total_depois"])
+                    st.write("Peak shaving demanda antes/depois:", ps["demanda_antes"], ps["demanda_depois"])
+                    if ps.get("alertas"):
+                        st.warning(ps["alertas"][0])
+    except Exception as e:
+        st.error(f"Falha no cálculo do sistema a partir do FIT: {e}")
