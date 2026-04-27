@@ -624,6 +624,43 @@ def realizar_dimensionamento_completo(
     return df_dim, None
 
 
+def aplicar_restricao_area_resultados(
+    resultados_df: pd.DataFrame,
+    available_area_m2: float,
+    packing_factor: float = 0.70,
+    module_length_m: float = 2.279,
+    module_width_m: float = 1.134,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Aplica restrição de área ao resultado de dimensionamento já calculado.
+    """
+    if resultados_df is None or resultados_df.empty:
+        return resultados_df, {"max_modules_by_area": 0, "warnings": ["Sem resultados para aplicar restrição de área."]}
+
+    module_area_m2 = float(module_length_m) * float(module_width_m)
+    usable_area = max(0.0, float(available_area_m2)) * max(0.5, min(float(packing_factor), 0.9))
+    max_modules_by_area = int(usable_area // module_area_m2) if module_area_m2 > 0 else 0
+
+    filtered = resultados_df[resultados_df["sistema_num_total_paineis"] <= max_modules_by_area].copy()
+    warnings = []
+    if filtered.empty:
+        # mantém a menor opção como fallback visual
+        filtered = resultados_df.nsmallest(1, "sistema_num_total_paineis").copy()
+        row = filtered.iloc[0]
+        max_kwp = max_modules_by_area * float(row.get("painel_potencia", 0.0)) / 1000.0
+        warnings.append(
+            "A área disponível limita o sistema fotovoltaico. "
+            f"O sistema máximo instalável nesta área é de {max_kwp:.2f} kWp, inferior ao sistema necessário para compensação integral."
+        )
+
+    return filtered.reset_index(drop=True), {
+        "module_area_m2": module_area_m2,
+        "usable_area_m2": usable_area,
+        "max_modules_by_area": max_modules_by_area,
+        "warnings": warnings,
+    }
+
+
 # ---------------------------------------------------------
 # Execução de teste simples
 # ---------------------------------------------------------

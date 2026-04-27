@@ -5,3 +5,6 @@ openpyxl
 requests
 geopy
 pytest
+folium
+streamlit-folium
+shapely
