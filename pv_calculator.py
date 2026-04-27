@@ -206,6 +206,52 @@ def calcular_energia_gerada(
     return ac_annual, ac_monthly
 
 
+def calcular_geracao_horaria_pvwatts(
+    potencia_dc_kwp: float,
+    latitude: float,
+    longitude: float,
+    azimuth: int,
+    tilt: float,
+    losses: float = DEFAULT_LOSSES,
+    array_type: int = DEFAULT_ARRAY_TYPE,
+    module_type: int = DEFAULT_MODULE_TYPE,
+    dc_ac_ratio: float = 1.2,
+    inv_eff: float = 96.0,
+):
+    """
+    Retorna geração horária AC em kW (8760 pontos) a partir do PVWatts.
+    Se a API retornar Wac, converte para kW.
+    """
+    if not potencia_dc_kwp or potencia_dc_kwp <= 0:
+        return None
+
+    params = {
+        "system_capacity": float(potencia_dc_kwp),
+        "module_type": int(module_type),
+        "losses": float(losses),
+        "array_type": int(array_type),
+        "tilt": float(tilt),
+        "azimuth": int(azimuth),
+        "lat": float(latitude),
+        "lon": float(longitude),
+        "timeframe": "hourly",
+        "dc_ac_ratio": float(dc_ac_ratio),
+        "inv_eff": float(inv_eff),
+    }
+
+    data = fazer_requisicao_pvwatts(params)
+    if not data:
+        return None
+
+    outputs = data.get("outputs", {}) if isinstance(data, dict) else {}
+    ac = outputs.get("ac")
+    if not isinstance(ac, list) or len(ac) < 8760:
+        return None
+
+    hourly = [float(v) / 1000.0 for v in ac[:8760]]  # W -> kW
+    return hourly
+
+
 # ---------------------------------------------------------
 # Equipamentos: carregar/salvar (Excel)
 # ---------------------------------------------------------
