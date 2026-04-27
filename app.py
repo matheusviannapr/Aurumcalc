@@ -21,6 +21,7 @@ from pv_calculator import (
     salvar_novo_painel,
     salvar_novo_inversor,
     calcular_geracao_horaria_pvwatts,
+    aplicar_restricao_area_resultados,
 )
 from hourly_analysis import (
     BillingGroupAInput,
@@ -37,6 +38,13 @@ from hourly_analysis import (
     simulate_peak_shaving,
     calculate_area_limited_pv,
 )
+from src.load_profiles import load_typical_profiles
+from src.load_profile_fitting import fit_load_profile_to_bill, adjusted_profile_from_fit
+from src.tariff_periods import classify_peak_hours
+from src.map_area import geocode_address, calculate_polygon_area_m2, render_area_map
+from src.self_consumption import analyze_self_consumption
+from src.peak_shaving import analyze_peak_shaving
+from src.load_shifting import simulate_simplified_load_shifting
 
 # --- Import opcional do gerador de LaTeX da memória de cálculo ---
 BUILD_TEX = True
@@ -865,3 +873,174 @@ if run_sizing:
                         st.warning(ps["alertas"][0])
     except Exception as e:
         st.error(f"Falha no cálculo do sistema a partir do FIT: {e}")
+
+st.markdown('---')
+st.header('Dimensionamento com Curva de Demanda Ajustada')
+st.warning('As curvas de demanda utilizadas nesta versão são curvas típicas/sintéticas. Para estudos executivos, recomenda-se calibração com memória de massa, medição real ou analisador de energia.')
+
+profiles_typical = load_typical_profiles()
+profile_map = {p['nome']: p for p in profiles_typical}
+
+cadv1, cadv2 = st.columns(2)
+with cadv1:
+    tipo_cliente_nome = st.selectbox('Tipo de cliente (curva típica)', options=list(profile_map.keys()))
+    grupo_adv = st.radio('Grupo tarifário (novo modo)', options=['A', 'B'], horizontal=True, key='grupo_adv')
+    dias_func_mes = st.number_input('Dias de funcionamento no mês', min_value=1, max_value=31, value=22)
+    peak_start = st.text_input('Horário ponta início', value='18:00')
+    peak_end = st.text_input('Horário ponta fim', value='21:00')
+    weekdays_only_peak = st.checkbox('Considerar ponta apenas em dias úteis', value=False)
+with cadv2:
+    endereco_mapa = st.text_input('Endereço ou coordenadas para mapa', value='São Paulo, SP')
+    packing_factor = st.slider('Fator de aproveitamento da área', min_value=0.50, max_value=0.90, value=0.70, step=0.01)
+    pct_shift = st.slider('Percentual de carga deslocável na ponta', min_value=0, max_value=100, value=0, step=5)
+    shift_window = st.selectbox('Janela de deslocamento', options=['madrugada', 'horário solar'])
+
+if grupo_adv == 'A':
+    a1, a2 = st.columns(2)
+    with a1:
+        energia_ponta_mes = st.number_input('Energia ponta (kWh/mês)', min_value=0.0, value=1000.0, step=10.0, key='adv_ep')
+        demanda_ponta_kw = st.number_input('Demanda ponta (kW)', min_value=0.0, value=120.0, step=1.0, key='adv_dp')
+        tarifa_energia_ponta_adv = st.number_input('Tarifa energia ponta (opcional)', min_value=0.0, value=1.2, step=0.01, key='adv_tp')
+        tarifa_demanda_ponta_adv = st.number_input('Tarifa demanda ponta (opcional)', min_value=0.0, value=0.0, step=0.01, key='adv_tdp')
+    with a2:
+        energia_fora_mes = st.number_input('Energia fora ponta (kWh/mês)', min_value=0.0, value=4000.0, step=10.0, key='adv_ef')
+        demanda_fora_kw = st.number_input('Demanda fora ponta (kW)', min_value=0.0, value=90.0, step=1.0, key='adv_df')
+        tarifa_energia_fora_adv = st.number_input('Tarifa energia fora ponta (opcional)', min_value=0.0, value=0.7, step=0.01, key='adv_tf')
+        tarifa_demanda_fora_adv = st.number_input('Tarifa demanda fora ponta (opcional)', min_value=0.0, value=0.0, step=0.01, key='adv_tdf')
+else:
+    b1, b2 = st.columns(2)
+    with b1:
+        energia_total_mes_b = st.number_input('Energia total kWh/mês', min_value=0.0, value=5000.0, step=10.0, key='adv_et')
+        demanda_estimada_kw = st.number_input('Demanda estimada kW (opcional)', min_value=0.0, value=0.0, step=1.0, key='adv_de')
+    with b2:
+        tarifa_energia_b_adv = st.number_input('Tarifa energia (opcional)', min_value=0.0, value=0.8, step=0.01, key='adv_tb')
+
+btn1, btn2, btn3 = st.columns(3)
+run_fit_adv = btn1.button('1. Gerar curva ajustada')
+run_area_adv = btn2.button('2. Definir área disponível')
+run_calc_adv = btn3.button('3. Calcular sistema fotovoltaico')
+
+if run_fit_adv:
+    selected = profile_map[tipo_cliente_nome]
+    peak_labels = classify_peak_hours(list(range(24)), peak_start, peak_end, weekdays_only=weekdays_only_peak)
+    if grupo_adv == 'A':
+        bill = {
+            'energia_ponta_kwh_mes': energia_ponta_mes,
+            'energia_fora_ponta_kwh_mes': energia_fora_mes,
+            'demanda_ponta_kw': demanda_ponta_kw,
+            'demanda_fora_ponta_kw': demanda_fora_kw,
+        }
+    else:
+        bill = {'energia_total_kwh_mes': energia_total_mes_b, 'demanda_estimada_kw': demanda_estimada_kw}
+
+    fit_adv = fit_load_profile_to_bill(
+        base_profile_24h=selected['curva_24h_pu'],
+        bill_data=bill,
+        operation_days=int(dias_func_mes),
+        peak_hours=peak_labels,
+        group_type=grupo_adv,
+    )
+    st.session_state['fit_adv'] = fit_adv
+    st.session_state['fit_adv_profile'] = selected
+    st.success('Curva ajustada gerada com sucesso.')
+
+if st.session_state.get('fit_adv'):
+    fit_adv = st.session_state['fit_adv']
+    selected = st.session_state['fit_adv_profile']
+    st.line_chart(pd.DataFrame({'curva_tipica_pu': selected['curva_24h_pu'], 'curva_ajustada_kw': fit_adv['load_curve_kw']}))
+    st.json({k: v for k, v in fit_adv.items() if k != 'load_curve_kw'})
+
+if run_area_adv:
+    try:
+        if ',' in endereco_mapa and len(endereco_mapa.split(',')) == 2:
+            lat_map, lon_map = float(endereco_mapa.split(',')[0]), float(endereco_mapa.split(',')[1])
+        else:
+            lat_map, lon_map = geocode_address(endereco_mapa)
+        st.session_state['adv_map_center'] = (lat_map, lon_map)
+    except Exception as e:
+        st.error(f'Falha ao geocodificar endereço: {e}')
+
+if st.session_state.get('adv_map_center'):
+    map_data = render_area_map(st.session_state['adv_map_center'])
+    drawing = map_data.get('last_active_drawing') if isinstance(map_data, dict) else None
+    if drawing and drawing.get('geometry', {}).get('type') == 'Polygon':
+        coords = drawing['geometry']['coordinates'][0]
+        latlon_coords = [(c[1], c[0]) for c in coords[:-1]]
+        area_m2 = calculate_polygon_area_m2(latlon_coords)
+        st.session_state['available_area_m2'] = area_m2
+        st.success(f'Área disponível estimada: {area_m2:.2f} m²')
+
+if st.session_state.get('available_area_m2'):
+    st.metric('Área disponível (m²)', f"{st.session_state['available_area_m2']:.2f}")
+
+if run_calc_adv:
+    fit_adv = st.session_state.get('fit_adv')
+    available_area_m2 = st.session_state.get('available_area_m2')
+    if fit_adv is None:
+        st.error('Execute o passo 1 para gerar a curva ajustada.')
+    elif not available_area_m2:
+        st.error('Defina a área disponível no mapa (passo 2).')
+    else:
+        adjusted = adjusted_profile_from_fit(tipo_cliente_nome, fit_adv)
+        target_monthly = adjusted.monthly_energy_kwh
+        resultados_df_adv, erro_adv = realizar_dimensionamento_completo(target_monthly, latitude, longitude, int(azimuth), float(tilt))
+        if erro_adv:
+            st.error(erro_adv)
+        else:
+            resultados_df_adv, area_meta = aplicar_restricao_area_resultados(
+                resultados_df_adv,
+                available_area_m2=available_area_m2,
+                packing_factor=packing_factor,
+            )
+
+            best = resultados_df_adv.iloc[0]
+            for warning in area_meta.get('warnings', []):
+                st.warning(warning)
+
+            pv_hourly = calcular_geracao_horaria_pvwatts(
+                potencia_dc_kwp=float(best['sistema_potencia_total_w']) / 1000.0,
+                latitude=latitude,
+                longitude=longitude,
+                azimuth=int(azimuth),
+                tilt=float(tilt),
+            ) or [0.0] * 8760
+            pv_day = pv_hourly[:24]
+            load_day = adjusted.hourly_kw
+            peak_labels = classify_peak_hours(list(range(24)), peak_start, peak_end, weekdays_only=weekdays_only_peak)
+
+            sc = analyze_self_consumption(load_day, pv_day)
+            ps = analyze_peak_shaving(load_day, pv_day, peak_labels)
+            ls = simulate_simplified_load_shifting(
+                energy_peak_kwh=fit_adv['energy_peak_kwh_estimated'],
+                energy_offpeak_kwh=fit_adv['energy_offpeak_kwh_estimated'],
+                percentual_carga_deslocavel_ponta=float(pct_shift) / 100.0,
+                shift_window=shift_window,
+                tarifa_ponta=tarifa_energia_ponta_adv if grupo_adv == 'A' else None,
+                tarifa_fora_ponta=tarifa_energia_fora_adv if grupo_adv == 'A' else None,
+            )
+
+            st.subheader('4. Resultado final (novo modo)')
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric('Potência recomendada (kWp)', f"{float(best['sistema_potencia_total_w'])/1000.0:.2f}")
+            m2.metric('Módulos', f"{int(best['sistema_num_total_paineis'])}")
+            m3.metric('Área necessária estimada (m²)', f"{int(best['sistema_num_total_paineis']) * area_meta['module_area_m2']:.2f}")
+            m4.metric('Área disponível (m²)', f"{available_area_m2:.2f}")
+
+            st.dataframe(resultados_df_adv.head(10), use_container_width=True)
+            st.line_chart(pd.DataFrame({'carga_ajustada_kw': load_day, 'geracao_pv_kw': pv_day, 'carga_liquida_kw': ps['net_load_kw']}))
+            st.bar_chart(pd.DataFrame({'autoconsumo_kwh': sc['self_consumption_kwh'], 'injecao_kwh': sc['grid_export_kwh']}))
+
+            st.json({
+                'autoconsumo': {
+                    'total_load_kwh': sc['total_load_kwh'],
+                    'total_pv_generation_kwh': sc['total_pv_generation_kwh'],
+                    'total_self_consumption_kwh': sc['total_self_consumption_kwh'],
+                    'total_grid_import_kwh': sc['total_grid_import_kwh'],
+                    'total_grid_export_kwh': sc['total_grid_export_kwh'],
+                    'self_consumption_ratio': sc['self_consumption_ratio'],
+                    'self_sufficiency_ratio': sc['self_sufficiency_ratio'],
+                },
+                'peak_shaving': ps,
+                'load_shifting': ls,
+                'fit_alerts': fit_adv.get('warnings', []),
+            })
