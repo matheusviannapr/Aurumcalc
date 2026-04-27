@@ -5,6 +5,7 @@ import traceback
 import inspect
 import pandas as pd
 import streamlit as st
+import numpy as np
 
 # --- Se existir segredo, propaga para variável de ambiente usada no pv_calculator ---
 if "PVWATTS_API_KEY" in st.secrets:
@@ -17,6 +18,22 @@ from pv_calculator import (
     geocode_location,
     salvar_novo_painel,
     salvar_novo_inversor,
+    calcular_geracao_horaria_pvwatts,
+)
+from hourly_analysis import (
+    BillingGroupAInput,
+    BillingGroupBInput,
+    list_profiles_by_sector,
+    load_profile,
+    calibrate_load_profile,
+    classify_tariff_periods,
+    month_hour_index,
+    calculate_hourly_energy_balance,
+    split_by_tariff_period,
+    compute_economic_summary,
+    simulate_load_shifting,
+    simulate_peak_shaving,
+    calculate_area_limited_pv,
 )
 
 # --- Import opcional do gerador de LaTeX da memória de cálculo ---
@@ -555,3 +572,133 @@ Este aplicativo integra duas etapas cruciais do dimensionamento fotovoltaico:
    - Define combinações de inversores e arranjos série/paralelo por MPPT respeitando limites elétricos.
    - Retorna opções ordenadas, priorizando a mais próxima da potência alvo.
 """)
+
+st.markdown("---")
+st.header("Análise Horária e Tarifária")
+st.caption("Versão inicial com perfis synthetic_for_testing. Não usar para proposta real sem validação de curva medida.")
+
+col_h1, col_h2 = st.columns(2)
+with col_h1:
+    customer_sector = st.selectbox(
+        "Tipo de cliente",
+        options=[
+            "escola", "supermercado", "frigorifico", "industria", "escritorio",
+            "varejo", "restaurante", "hotel", "hospital", "custom"
+        ],
+        index=0
+    )
+    dias_operacao = st.slider("Dias de funcionamento por semana", 1, 7, 5)
+    horario_operacao = st.slider("Horário de funcionamento", 0, 24, (8, 18))
+with col_h2:
+    grupo = st.radio("Grupo tarifário", options=["A", "B"], horizontal=True)
+    mes_ref = st.text_input("Mês de referência (YYYY-MM)", value="2026-01")
+    dias_ciclo = st.number_input("Dias do ciclo", min_value=1, max_value=31, value=30)
+    ponta_window = st.slider("Janela de ponta (hora início/fim)", 0, 24, (18, 21))
+
+profiles = list_profiles_by_sector(customer_sector)
+profile_ids = [p["id"] for p in profiles]
+profile_choice = st.selectbox("Perfil base", options=profile_ids if profile_ids else ["sem_perfil"])
+
+if grupo == "A":
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        energia_ponta = st.number_input("Energia ponta (kWh)", min_value=0.0, value=1000.0, step=10.0)
+        demanda_ponta = st.number_input("Demanda ponta (kW)", min_value=0.0, value=120.0, step=1.0)
+        tarifa_ponta = st.number_input("Tarifa energia ponta (R$/kWh)", min_value=0.0, value=1.2, step=0.01)
+    with c2:
+        energia_fora = st.number_input("Energia fora ponta (kWh)", min_value=0.0, value=4000.0, step=10.0)
+        demanda_fora = st.number_input("Demanda fora ponta (kW)", min_value=0.0, value=90.0, step=1.0)
+        tarifa_fora = st.number_input("Tarifa energia fora ponta (R$/kWh)", min_value=0.0, value=0.7, step=0.01)
+    with c3:
+        tarifa_dem_p = st.number_input("Tarifa demanda ponta (R$/kW)", min_value=0.0, value=30.0, step=0.1)
+        tarifa_dem_f = st.number_input("Tarifa demanda fora ponta (R$/kW)", min_value=0.0, value=20.0, step=0.1)
+
+    billing_obj = BillingGroupAInput(
+        concessionaria="N/A", modalidade_tarifaria="verde", subgrupo="A4", mes_referencia=mes_ref,
+        dias_ciclo=int(dias_ciclo), ponta_inicio_hora=ponta_window[0], ponta_fim_hora=ponta_window[1],
+        feriados_nacionais=[], energia_ponta_kwh=energia_ponta, energia_fora_ponta_kwh=energia_fora,
+        demanda_medida_ponta_kw=demanda_ponta, demanda_medida_fora_ponta_kw=demanda_fora,
+        tarifa_energia_ponta=tarifa_ponta, tarifa_energia_fora_ponta=tarifa_fora,
+        tarifa_demanda_ponta=tarifa_dem_p, tarifa_demanda_fora_ponta=tarifa_dem_f,
+    )
+else:
+    c1, c2 = st.columns(2)
+    with c1:
+        energia_total_b = st.number_input("Energia total (kWh)", min_value=0.0, value=5000.0, step=10.0)
+        energia_ponta_b = st.number_input("Energia ponta (branca, opcional)", min_value=0.0, value=0.0, step=10.0)
+        energia_fora_b = st.number_input("Energia fora ponta (branca, opcional)", min_value=0.0, value=0.0, step=10.0)
+    with c2:
+        tarifa_energia_b = st.number_input("Tarifa energia (R$/kWh)", min_value=0.0, value=0.8, step=0.01)
+        tarifa_ponta_b = st.number_input("Tarifa ponta (branca)", min_value=0.0, value=1.3, step=0.01)
+        tarifa_fora_b = st.number_input("Tarifa fora ponta (branca)", min_value=0.0, value=0.6, step=0.01)
+    billing_obj = BillingGroupBInput(
+        concessionaria="N/A", modalidade="convencional", mes_referencia=mes_ref, dias_ciclo=int(dias_ciclo),
+        energia_total_kwh=energia_total_b, energia_ponta_kwh=energia_ponta_b or None, energia_fora_ponta_kwh=energia_fora_b or None,
+        tarifa_energia=tarifa_energia_b, tarifa_energia_ponta=tarifa_ponta_b, tarifa_energia_fora_ponta=tarifa_fora_b,
+    )
+
+if st.button("Calibrar curva"):
+    try:
+        selected_meta = next((p for p in profiles if p["id"] == profile_choice), None)
+        if not selected_meta:
+            st.error("Nenhum perfil disponível para o setor.")
+        else:
+            candidate = load_profile(selected_meta["path"])
+            calibration = calibrate_load_profile(
+                candidate_profiles=[candidate],
+                billing_data=billing_obj,
+                customer_type=customer_sector,
+                dias_funcionamento_semana=dias_operacao,
+                horario_funcionamento=horario_operacao,
+            )
+            st.success(f"Perfil calibrado: {calibration.perfil_escolhido_id} | fator: {calibration.fator_aplicado:.4f}")
+            if calibration.alertas:
+                for alert in calibration.alertas:
+                    st.warning(alert)
+
+            idx = month_hour_index(mes_ref, int(dias_ciclo))
+            pv_hourly = calcular_geracao_horaria_pvwatts(
+                potencia_dc_kwp=5.0, latitude=latitude, longitude=longitude, azimuth=int(azimuth), tilt=float(tilt)
+            ) or [0.0] * len(idx)
+            pv_slice = np.asarray(pv_hourly[: len(idx)], dtype=float)
+            balance = calculate_hourly_energy_balance(calibration.curva_calibrada_kw, pv_slice)
+            periods = classify_tariff_periods(idx, ponta_window[0], ponta_window[1], [])
+            split = split_by_tariff_period(balance, periods)
+            econ = compute_economic_summary(split, billing_obj)
+
+            st.subheader("Curva calibrada x PV")
+            chart_df = pd.DataFrame({
+                "carga_kw": calibration.curva_calibrada_kw[:168],
+                "pv_kw": pv_slice[:168],
+                "import_kw": balance["grid_import_kw"].values[:168],
+            })
+            st.line_chart(chart_df)
+
+            st.subheader("Resumo de economia mensal")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Economia ponta (R$)", fmt_num(econ["economia_energia_ponta"], 2))
+            c2.metric("Economia fora ponta (R$)", fmt_num(econ["economia_energia_fora_ponta"], 2))
+            c3.metric("Economia total mensal (R$)", fmt_num(econ["economia_total_mensal"], 2))
+
+            st.subheader("Área máxima disponível")
+            area_limit = calculate_area_limited_pv(
+                area_disponivel_m2=100.0, modulo_area_m2=2.3, fator_ocupacao=0.75,
+                potencia_modulo_w=550.0, potencia_sistema_kwp=5.0,
+            )
+            st.json(area_limit)
+
+            ls = simulate_load_shifting(
+                calibration.curva_calibrada_kw, periods, percentual_flexivel=0.15,
+                limite_energia_deslocavel_dia_kwh=30.0, limite_potencia_deslocavel_kw=10.0,
+            )
+            ps = simulate_peak_shaving(
+                balance["grid_import_kw"].values, demand_target_kw=float(np.percentile(balance["grid_import_kw"], 95)),
+                battery_power_kw=20.0, battery_capacity_kwh=60.0,
+            )
+            with st.expander("Resultados load shifting e peak shaving"):
+                st.write("Load shifting (energia antes/depois):", ls["energia_total_antes"], ls["energia_total_depois"])
+                st.write("Peak shaving demanda antes/depois:", ps["demanda_antes"], ps["demanda_depois"])
+                if ps.get("alertas"):
+                    st.warning(ps["alertas"][0])
+    except Exception as e:
+        st.error(f"Falha na análise horária: {e}")
