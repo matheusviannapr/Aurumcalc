@@ -16,7 +16,7 @@ from hourly_analysis import (
 
 
 def test_classify_tariff_weekend_and_holiday_as_offpeak():
-    idx = pd.date_range("2026-01-01", periods=72, freq="H")
+    idx = pd.date_range("2026-01-01", periods=72, freq="h")
     periods = classify_tariff_periods(idx, 18, 21, feriados_nacionais=["2026-01-01"])
     # 01/01 é feriado; sábado/domingo sempre fora ponta
     assert periods[18] == "fora_ponta"

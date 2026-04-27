@@ -148,7 +148,7 @@ def classify_tariff_periods(
 
 def month_hour_index(month_str: str, days_in_cycle: int) -> pd.DatetimeIndex:
     year, month = map(int, month_str.split("-"))
-    return pd.date_range(datetime(year, month, 1), periods=days_in_cycle * 24, freq="H")
+    return pd.date_range(datetime(year, month, 1), periods=days_in_cycle * 24, freq="h")
 
 
 def calibrate_load_profile(
