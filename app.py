@@ -900,11 +900,13 @@ if grupo_adv == 'A':
     with a1:
         energia_ponta_mes = st.number_input('Energia ponta (kWh/mês)', min_value=0.0, value=1000.0, step=10.0, key='adv_ep')
         demanda_ponta_kw = st.number_input('Demanda ponta (kW)', min_value=0.0, value=120.0, step=1.0, key='adv_dp')
+        demanda_contratada_ponta_kw = st.number_input('Demanda contratada ponta (opcional)', min_value=0.0, value=0.0, step=1.0, key='adv_dcp')
         tarifa_energia_ponta_adv = st.number_input('Tarifa energia ponta (opcional)', min_value=0.0, value=1.2, step=0.01, key='adv_tp')
         tarifa_demanda_ponta_adv = st.number_input('Tarifa demanda ponta (opcional)', min_value=0.0, value=0.0, step=0.01, key='adv_tdp')
     with a2:
         energia_fora_mes = st.number_input('Energia fora ponta (kWh/mês)', min_value=0.0, value=4000.0, step=10.0, key='adv_ef')
         demanda_fora_kw = st.number_input('Demanda fora ponta (kW)', min_value=0.0, value=90.0, step=1.0, key='adv_df')
+        demanda_contratada_fora_kw = st.number_input('Demanda contratada fora ponta (opcional)', min_value=0.0, value=0.0, step=1.0, key='adv_dcf')
         tarifa_energia_fora_adv = st.number_input('Tarifa energia fora ponta (opcional)', min_value=0.0, value=0.7, step=0.01, key='adv_tf')
         tarifa_demanda_fora_adv = st.number_input('Tarifa demanda fora ponta (opcional)', min_value=0.0, value=0.0, step=0.01, key='adv_tdf')
 else:
@@ -915,10 +917,11 @@ else:
     with b2:
         tarifa_energia_b_adv = st.number_input('Tarifa energia (opcional)', min_value=0.0, value=0.8, step=0.01, key='adv_tb')
 
-btn1, btn2, btn3 = st.columns(3)
+btn1, btn2, btn3, btn4 = st.columns(4)
 run_fit_adv = btn1.button('1. Gerar curva ajustada')
 run_area_adv = btn2.button('2. Definir área disponível')
 run_calc_adv = btn3.button('3. Calcular sistema fotovoltaico')
+run_report_adv = btn4.button('4. Gerar relatório')
 
 if run_fit_adv:
     selected = profile_map[tipo_cliente_nome]
@@ -929,6 +932,12 @@ if run_fit_adv:
             'energia_fora_ponta_kwh_mes': energia_fora_mes,
             'demanda_ponta_kw': demanda_ponta_kw,
             'demanda_fora_ponta_kw': demanda_fora_kw,
+            'demanda_contratada_ponta_kw': demanda_contratada_ponta_kw or None,
+            'demanda_contratada_fora_ponta_kw': demanda_contratada_fora_kw or None,
+            'tarifa_energia_ponta': tarifa_energia_ponta_adv or None,
+            'tarifa_energia_fora_ponta': tarifa_energia_fora_adv or None,
+            'tarifa_demanda_ponta': tarifa_demanda_ponta_adv or None,
+            'tarifa_demanda_fora_ponta': tarifa_demanda_fora_adv or None,
         }
     else:
         bill = {'energia_total_kwh_mes': energia_total_mes_b, 'demanda_estimada_kw': demanda_estimada_kw}
@@ -1044,3 +1053,40 @@ if run_calc_adv:
                 'load_shifting': ls,
                 'fit_alerts': fit_adv.get('warnings', []),
             })
+
+            st.bar_chart(pd.DataFrame({
+                'energia_ponta_kwh': [fit_adv['energy_peak_kwh_estimated']],
+                'energia_fora_ponta_kwh': [fit_adv['energy_offpeak_kwh_estimated']],
+            }))
+            st.bar_chart(pd.DataFrame({
+                'demanda_antes_kw': [ps['original_peak_demand_kw'], ps['original_peak_demand_peak_hours_kw'], ps['original_peak_demand_offpeak_hours_kw']],
+                'demanda_depois_kw': [ps['net_peak_demand_kw'], ps['net_peak_demand_peak_hours_kw'], ps['net_peak_demand_offpeak_hours_kw']],
+            }, index=['total', 'ponta', 'fora_ponta']))
+            st.bar_chart(pd.DataFrame({
+                'peak_shaving_kw': [ps['peak_shaving_kw'], ps['peak_shaving_peak_hours_kw'], ps['peak_shaving_offpeak_hours_kw']],
+            }, index=['total', 'ponta', 'fora_ponta']))
+
+            st.session_state['adv_last_report'] = {
+                'potencia_recomendada_kwp': float(best['sistema_potencia_total_w']) / 1000.0,
+                'modulos': int(best['sistema_num_total_paineis']),
+                'inversor': best.get('inversor_modelo'),
+                'area_necessaria_m2': int(best['sistema_num_total_paineis']) * area_meta['module_area_m2'],
+                'area_disponivel_m2': available_area_m2,
+                'autoconsumo': sc,
+                'peak_shaving': ps,
+                'load_shifting': ls,
+                'fit_alerts': fit_adv.get('warnings', []),
+            }
+
+
+if run_report_adv:
+    report = st.session_state.get('adv_last_report')
+    if not report:
+        st.error('Execute os passos 1-3 antes de gerar o relatório.')
+    else:
+        st.download_button(
+            'Baixar relatório (JSON)',
+            data=json.dumps(report, ensure_ascii=False, indent=2),
+            file_name='relatorio_dimensionamento_curva_demanda.json',
+            mime='application/json',
+        )
