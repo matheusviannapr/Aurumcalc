@@ -15,7 +15,8 @@ from pv_calculator import (
     salvar_novo_inversor,
     salvar_novo_painel,
 )
-from src.load_profile_fitting import adjusted_profile_from_fit, fit_load_profile_to_bill
+from src.client_db import list_projects, load_project, upsert_project
+from src.load_profile_fitting import fit_load_profile_to_bill
 from src.load_profiles import load_typical_profiles
 from src.map_area import calculate_polygon_area_m2, geocode_address, render_area_map
 from src.peak_shaving import analyze_peak_shaving
@@ -99,6 +100,8 @@ def ensure_state():
         "area_meta": None,
         "advanced_metrics": None,
         "economic_metrics": None,
+        "active_project": None,
+        "project_name": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -106,6 +109,26 @@ def ensure_state():
 
 
 ensure_state()
+
+
+def _serialize_state():
+    payload = {}
+    for key, value in st.session_state.items():
+        if key.startswith("FormSubmitter"):
+            continue
+        if isinstance(value, pd.DataFrame):
+            payload[key] = {"__type__": "dataframe", "records": value.to_dict(orient="records")}
+        else:
+            payload[key] = value
+    return payload
+
+
+def _restore_state(payload):
+    for key, value in payload.items():
+        if isinstance(value, dict) and value.get("__type__") == "dataframe":
+            st.session_state[key] = pd.DataFrame(value.get("records", []))
+        else:
+            st.session_state[key] = value
 
 # Sidebar
 st.sidebar.title("AurumCalc • Jornada Guiada")
@@ -119,6 +142,44 @@ with st.sidebar.expander("Base de equipamentos"):
     df_p, df_i = load_data()
     st.caption(f"Painéis cadastrados: {len(df_p)}")
     st.caption(f"Inversores cadastrados: {len(df_i)}")
+
+with st.sidebar.expander("💾 Banco de projetos por cliente", expanded=True):
+    db_client = st.text_input("Cliente para buscar/salvar", value=st.session_state.get("cliente_nome", ""))
+    if db_client and not st.session_state.get("cliente_nome"):
+        st.session_state["cliente_nome"] = db_client
+
+    project_rows = list_projects(db_client if db_client else None)
+    project_labels = [f"{row[0]} | {row[1]} | {row[2][:19]}" for row in project_rows]
+    selected_label = st.selectbox("Projetos salvos", options=["Selecione..."] + project_labels)
+
+    if st.button("Carregar projeto selecionado"):
+        if selected_label == "Selecione...":
+            st.warning("Selecione um projeto salvo para carregar.")
+        else:
+            idx = project_labels.index(selected_label)
+            client_name, project_name, _ = project_rows[idx]
+            payload = load_project(client_name, project_name)
+            if payload:
+                _restore_state(payload)
+                st.session_state["active_project"] = f"{client_name}:{project_name}"
+                st.success(f"Projeto '{project_name}' carregado para o cliente '{client_name}'.")
+                st.rerun()
+            else:
+                st.error("Projeto não encontrado no banco de dados.")
+
+    st.session_state["project_name"] = st.text_input(
+        "Nome do projeto",
+        value=st.session_state.get("project_name", "") or st.session_state.get("localizacao", ""),
+    )
+    if st.button("Salvar/Atualizar projeto no banco"):
+        client_name = (db_client or st.session_state.get("cliente_nome", "")).strip()
+        project_name = st.session_state.get("project_name", "").strip()
+        if not client_name or not project_name:
+            st.error("Informe cliente e nome do projeto para salvar.")
+        else:
+            upsert_project(client_name, project_name, _serialize_state())
+            st.session_state["active_project"] = f"{client_name}:{project_name}"
+            st.success(f"Projeto '{project_name}' salvo com sucesso para o cliente '{client_name}'.")
 
 with st.sidebar.expander("➕ Novo equipamento"):
     tab_p, tab_i = st.tabs(["Painel", "Inversor"])
