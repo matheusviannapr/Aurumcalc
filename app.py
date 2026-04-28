@@ -451,6 +451,10 @@ if step == 5:
     res = st.session_state.get("resultados_df_adv")
     if isinstance(res, pd.DataFrame) and not res.empty:
         best = res.iloc[0]
+        if best.get("fonte_geracao") == "estimativa_fallback":
+            st.warning(
+                "PVWatts indisponível no momento. O dimensionamento foi calculado com estimativa offline de produtividade solar."
+            )
         area_meta = st.session_state.get("area_meta") or {"module_area_m2": 2.3, "warnings": []}
         area_req = int(best.get("sistema_num_total_paineis", 0)) * float(area_meta.get("module_area_m2", 2.3))
         c1, c2, c3, c4 = st.columns(4)

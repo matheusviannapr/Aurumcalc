@@ -40,6 +40,29 @@ def _is_number(x):
         return False
 
 
+def _estimate_specific_yield_kwh_kwp_year(latitude: float) -> float:
+    """
+    Estimativa heurística de produtividade anual (kWh/kWp/ano) para fallback sem PVWatts.
+    Faixa típica Brasil: ~1.250 a ~1.900 kWh/kWp/ano.
+    """
+    try:
+        lat_abs = abs(float(latitude))
+    except Exception:
+        lat_abs = 15.0
+    # regra simples: reduz produtividade com aumento de latitude absoluta
+    yield_est = 1900.0 - (lat_abs * 20.0)
+    return float(max(1250.0, min(1900.0, yield_est)))
+
+
+def _estimate_monthly_from_annual(annual_kwh: float) -> list[float]:
+    """
+    Distribuição mensal aproximada (soma = 1.0) para fallback.
+    Mantém sazonalidade moderada sem depender de API externa.
+    """
+    weights = [0.092, 0.090, 0.088, 0.084, 0.080, 0.076, 0.074, 0.076, 0.081, 0.086, 0.089, 0.084]
+    return [float(annual_kwh) * w for w in weights]
+
+
 # ---------------------------------------------------------
 # Geocodificação
 # ---------------------------------------------------------
@@ -574,8 +597,17 @@ def realizar_dimensionamento_completo(
         losses=DEFAULT_LOSSES,
         array_type=DEFAULT_ARRAY_TYPE
     )
+    used_pvwatts_fallback = False
     if not kWp:
-        return None, "Falha ao calcular a potência de pico necessária via PVWatts. Verifique a chave da API, coordenadas ou a conectividade."
+        # Fallback offline para não bloquear fluxo quando API/chave/rede falharem.
+        consumo_anual_kwh = float(consumo_medio_mensal) * 12.0
+        specific_yield = _estimate_specific_yield_kwh_kwp_year(latitude)
+        if specific_yield <= 0:
+            return None, "Falha ao calcular a potência de pico necessária. Verifique consumo, coordenadas e disponibilidade da API."
+        kWp = consumo_anual_kwh / specific_yield
+        ac_monthly_1kw = _estimate_monthly_from_annual(specific_yield)
+        data_1kW = {"fonte": "fallback_estimado", "specific_yield_kwh_kwp_ano": specific_yield}
+        used_pvwatts_fallback = True
 
     # 2) Carregar bases
     df_paineis, df_inversores = carregar_dados_equipamentos(arquivo_equipamentos)
@@ -598,11 +630,15 @@ def realizar_dimensionamento_completo(
         losses=DEFAULT_LOSSES,
         array_type=DEFAULT_ARRAY_TYPE
     )
+    if energia_anual_kwh is None and used_pvwatts_fallback:
+        energia_anual_kwh = float(kWp) * float(_estimate_specific_yield_kwh_kwp_year(latitude))
+        ac_monthly_dim = _estimate_monthly_from_annual(energia_anual_kwh)
 
     # 5) Completar colunas
     df_dim["potencia_pico_necessaria_kw"] = float(kWp)
     df_dim["consumo_anual_kwh"] = float(consumo_medio_mensal) * 12.0
     df_dim["energia_gerada_anual_kwh"] = energia_anual_kwh if energia_anual_kwh is not None else None
+    df_dim["fonte_geracao"] = "estimativa_fallback" if used_pvwatts_fallback else "pvwatts"
 
     # tenta abastecer energia_mensal_kwh_array:
     # prioridade: a simulação com kWp real (ac_monthly_dim); fallback: escala ac_monthly_1kw * kWp
