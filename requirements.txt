@@ -8,3 +8,4 @@ pytest
 folium
 streamlit-folium
 shapely
+matplotlib
