@@ -28,34 +28,38 @@ from src.tariff_periods import classify_peak_hours
 from src.load_shifting import simulate_simplified_load_shifting
 
 
-def _fig_to_png_bytes(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
-
-
 def build_latex_report_zip(report: dict) -> bytes:
     files = {}
+    figures_tex = []
     historico = report.get("3_historico_consumo", [])
     if historico:
-        fig1, ax1 = plt.subplots(figsize=(8, 4))
         meses = [str(row.get("Mês", i + 1)) for i, row in enumerate(historico)]
         consumo = [float(row.get("Consumo (kWh)", 0) or 0) for row in historico]
-        ax1.bar(meses, consumo, color="#1f77b4")
-        ax1.set_title("Histórico de consumo")
-        ax1.set_ylabel("kWh")
-        files["fig_historico_consumo.png"] = _fig_to_png_bytes(fig1)
+        coords = " ".join([f"({m},{v:.2f})" for m, v in zip(meses, consumo)])
+        figures_tex.append(
+            "\\begin{figure}[h!]\\centering\\begin{tikzpicture}\\begin{axis}[ybar,symbolic x coords={"
+            + ",".join(meses)
+            + "},xtick=data,x tick label style={rotate=45,anchor=east},width=0.95\\linewidth,height=6cm,ylabel={kWh},title={Histórico de consumo}]"
+            + f"\\addplot coordinates {{{coords}}};"
+            + "\\end{axis}\\end{tikzpicture}\\caption{Histórico de consumo.}\\end{figure}"
+        )
 
     eco = report.get("8_viabilidade_economica", {}) or {}
     sens = eco.get("sensibilidade_tarifaria", {})
     if sens:
-        fig2, ax2 = plt.subplots(figsize=(6, 4))
-        ax2.bar(list(sens.keys()), list(sens.values()), color="#2ca02c")
-        ax2.set_title("Sensibilidade tarifária")
-        ax2.set_ylabel("R$")
-        files["fig_sensibilidade_tarifaria.png"] = _fig_to_png_bytes(fig2)
+        labels = list(sens.keys())
+        values = [float(v or 0) for v in sens.values()]
+        coords = " ".join([f"({m},{v:.2f})" for m, v in zip(labels, values)])
+        figures_tex.append(
+            "\\begin{figure}[h!]\\centering\\begin{tikzpicture}\\begin{axis}[ybar,symbolic x coords={"
+            + ",".join(labels)
+            + "},xtick=data,width=0.75\\linewidth,height=6cm,ylabel={R\\$},title={Sensibilidade tarifária}]"
+            + f"\\addplot coordinates {{{coords}}};"
+            + "\\end{axis}\\end{tikzpicture}\\caption{Sensibilidade tarifária.}\\end{figure}"
+        )
+
+    if not figures_tex:
+        figures_tex.append("Sem dados suficientes para gerar gráficos.")
 
     latex = f"""\\documentclass[11pt,a4paper]{{article}}
 \\usepackage[utf8]{{inputenc}}
@@ -64,6 +68,8 @@ def build_latex_report_zip(report: dict) -> bytes:
 \\usepackage{{graphicx}}
 \\usepackage{{booktabs}}
 \\usepackage{{geometry}}
+\\usepackage{{pgfplots}}
+\\pgfplotsset{{compat=1.18}}
 \\geometry{{margin=2.2cm}}
 \\title{{Relatório Técnico Fotovoltaico - AurumCalc}}
 \\author{{AurumCalc}}
@@ -77,8 +83,7 @@ Local: {report.get("1_resumo_executivo", {}).get("local", "N/D")}\\\\
 Latitude: {report.get("2_premissas", {}).get("latitude", "N/D")}\\\\
 Longitude: {report.get("2_premissas", {}).get("longitude", "N/D")}\\\\
 \\section{{Análises gráficas}}
-\\begin{{figure}}[h!]\\centering\\includegraphics[width=0.95\\linewidth]{{fig_historico_consumo.png}}\\caption{{Histórico de consumo.}}\\end{{figure}}
-\\begin{{figure}}[h!]\\centering\\includegraphics[width=0.70\\linewidth]{{fig_sensibilidade_tarifaria.png}}\\caption{{Sensibilidade tarifária.}}\\end{{figure}}
+{"".join(figures_tex)}
 \\section{{Resultados principais}}
 Economia anual (R$): {eco.get("economia_anual", "N/D")}\\\\
 Payback (anos): {eco.get("payback", "N/D")}\\\\
@@ -407,6 +412,46 @@ if step == 3:
     profile_map = {p["nome"]: p for p in profiles}
 
     tipo = st.selectbox("Perfil típico", options=list(profile_map.keys()))
+    selected = profile_map[tipo]
+    base_curve = selected["curva_24h_pu"]
+
+    st.markdown("#### Ajuste fino da curva característica (24 blocos/h)")
+    use_custom_curve = st.checkbox("Editar curva horária manualmente antes do fit", value=False)
+    if "custom_curve_24h" not in st.session_state or not isinstance(st.session_state.get("custom_curve_24h"), list):
+        st.session_state["custom_curve_24h"] = list(base_curve)
+    if st.button("Resetar curva para o perfil típico selecionado"):
+        st.session_state["custom_curve_24h"] = list(base_curve)
+
+    if use_custom_curve:
+        custom_df = pd.DataFrame(
+            {
+                "Hora": list(range(24)),
+                "Peso relativo (pu)": st.session_state["custom_curve_24h"],
+            }
+        )
+        edited = st.data_editor(
+            custom_df,
+            use_container_width=True,
+            num_rows="fixed",
+            column_config={
+                "Hora": st.column_config.NumberColumn("Hora", disabled=True),
+                "Peso relativo (pu)": st.column_config.NumberColumn("Peso relativo (pu)", min_value=0.0, step=0.01, format="%.4f"),
+            },
+            key="curve_editor_24h",
+        )
+        edited_vals = pd.to_numeric(edited["Peso relativo (pu)"], errors="coerce").fillna(0.0).clip(lower=0.0).tolist()
+        if len(edited_vals) == 24:
+            soma = float(sum(edited_vals))
+            if soma > 0:
+                normalized_vals = [v / soma for v in edited_vals]
+                st.session_state["custom_curve_24h"] = normalized_vals
+                st.caption("Curva customizada normalizada automaticamente para soma = 1,00.")
+            else:
+                st.warning("A soma da curva está zerada. Ajuste ao menos uma hora com valor positivo.")
+        st.line_chart(pd.DataFrame({"Curva customizada (pu)": st.session_state["custom_curve_24h"]}))
+    else:
+        st.session_state["custom_curve_24h"] = list(base_curve)
+
     dias_func = st.number_input("Dias de funcionamento/mês", min_value=1, max_value=31, value=22)
     peak_start = st.text_input("Início ponta", value="18:00")
     peak_end = st.text_input("Fim ponta", value="21:00")
@@ -431,10 +476,10 @@ if step == 3:
         bill = {"energia_total_kwh_mes": energy_total, "demanda_estimada_kw": 0.0}
 
     if st.button("Calibrar curva e gerar fit"):
-        selected = profile_map[tipo]
         peak_labels = classify_peak_hours(list(range(24)), peak_start, peak_end, weekdays_only=False)
+        curve_for_fit = st.session_state["custom_curve_24h"] if use_custom_curve else selected["curva_24h_pu"]
         fit = fit_load_profile_to_bill(
-            base_profile_24h=selected["curva_24h_pu"],
+            base_profile_24h=curve_for_fit,
             bill_data=bill,
             operation_days=int(dias_func),
             peak_hours=peak_labels,
