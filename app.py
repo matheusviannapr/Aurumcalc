@@ -27,6 +27,8 @@ from src.self_consumption import analyze_self_consumption
 from src.tariff_periods import classify_peak_hours
 from src.load_shifting import simulate_simplified_load_shifting
 
+APP_BUILD = "no-matplotlib-2026-04-29"
+
 
 def build_latex_report_zip(report: dict) -> bytes:
     files = {}
