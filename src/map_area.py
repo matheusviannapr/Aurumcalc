@@ -55,7 +55,7 @@ def render_area_map(center: tuple[float, float], zoom: int = 19, key: str = "are
         Draw(
             export=True,
             draw_options={
-                "polyline": False,
+                "polyline": True,
                 "rectangle": True,
                 "circle": False,
                 "marker": False,
@@ -68,3 +68,13 @@ def render_area_map(center: tuple[float, float], zoom: int = 19, key: str = "are
         pass
 
     return st_folium(fmap, width="100%", height=520, key=key)
+
+
+def calculate_azimuth_from_points(start_lat: float, start_lon: float, end_lat: float, end_lon: float) -> float:
+    lat1 = math.radians(start_lat)
+    lat2 = math.radians(end_lat)
+    dlon = math.radians(end_lon - start_lon)
+    x = math.sin(dlon) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    bearing = math.degrees(math.atan2(x, y))
+    return (bearing + 360.0) % 360.0
