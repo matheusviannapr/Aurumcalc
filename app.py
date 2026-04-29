@@ -1,5 +1,7 @@
+import io
 import json
 import os
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -18,11 +20,90 @@ from pv_calculator import (
 from src.client_db import list_projects, load_project, upsert_project
 from src.load_profile_fitting import fit_load_profile_to_bill
 from src.load_profiles import load_typical_profiles
-from src.map_area import calculate_polygon_area_m2, geocode_address, render_area_map
+from src.map_area import calculate_polygon_area_m2, calculate_azimuth_from_points, geocode_address, render_area_map
 from src.peak_shaving import analyze_peak_shaving
 from src.self_consumption import analyze_self_consumption
 from src.tariff_periods import classify_peak_hours
 from src.load_shifting import simulate_simplified_load_shifting
+
+
+def build_latex_report_zip(report: dict) -> bytes:
+    files = {}
+    figures_tex = []
+    historico = report.get("3_historico_consumo", [])
+    if historico:
+        meses = [str(row.get("Mês", i + 1)) for i, row in enumerate(historico)]
+        consumo = [float(row.get("Consumo (kWh)", 0) or 0) for row in historico]
+        coords = " ".join([f"({m},{v:.2f})" for m, v in zip(meses, consumo)])
+        figures_tex.append(
+            "\\begin{figure}[h!]\\centering\\begin{tikzpicture}\\begin{axis}[ybar,symbolic x coords={"
+            + ",".join(meses)
+            + "},xtick=data,x tick label style={rotate=45,anchor=east},width=0.95\\linewidth,height=6cm,ylabel={kWh},title={Histórico de consumo}]"
+            + f"\\addplot coordinates {{{coords}}};"
+            + "\\end{axis}\\end{tikzpicture}\\caption{Histórico de consumo.}\\end{figure}"
+        )
+
+    eco = report.get("8_viabilidade_economica", {}) or {}
+    sens = eco.get("sensibilidade_tarifaria", {})
+    if sens:
+        labels = list(sens.keys())
+        values = [float(v or 0) for v in sens.values()]
+        coords = " ".join([f"({m},{v:.2f})" for m, v in zip(labels, values)])
+        figures_tex.append(
+            "\\begin{figure}[h!]\\centering\\begin{tikzpicture}\\begin{axis}[ybar,symbolic x coords={"
+            + ",".join(labels)
+            + "},xtick=data,width=0.75\\linewidth,height=6cm,ylabel={R\\$},title={Sensibilidade tarifária}]"
+            + f"\\addplot coordinates {{{coords}}};"
+            + "\\end{axis}\\end{tikzpicture}\\caption{Sensibilidade tarifária.}\\end{figure}"
+        )
+
+    if not figures_tex:
+        figures_tex.append("Sem dados suficientes para gerar gráficos.")
+
+    latex = f"""\\documentclass[11pt,a4paper]{{article}}
+\\usepackage[utf8]{{inputenc}}
+\\usepackage[T1]{{fontenc}}
+\\usepackage[brazil]{{babel}}
+\\usepackage{{graphicx}}
+\\usepackage{{booktabs}}
+\\usepackage{{geometry}}
+\\usepackage{{pgfplots}}
+\\pgfplotsset{{compat=1.18}}
+\\geometry{{margin=2.2cm}}
+\\title{{Relatório Técnico Fotovoltaico - AurumCalc}}
+\\author{{AurumCalc}}
+\\date{{\\today}}
+\\begin{{document}}
+\\maketitle
+\\section{{Resumo executivo}}
+Cliente: {report.get("1_resumo_executivo", {}).get("cliente", "N/D")}\\\\
+Local: {report.get("1_resumo_executivo", {}).get("local", "N/D")}\\\\
+\\section{{Premissas}}
+Latitude: {report.get("2_premissas", {}).get("latitude", "N/D")}\\\\
+Longitude: {report.get("2_premissas", {}).get("longitude", "N/D")}\\\\
+\\section{{Análises gráficas}}
+{"".join(figures_tex)}
+\\section{{Resultados principais}}
+Economia anual (R$): {eco.get("economia_anual", "N/D")}\\\\
+Payback (anos): {eco.get("payback", "N/D")}\\\\
+ROI 25 anos (\\%): {eco.get("roi", "N/D")}\\\\
+\\section{{Próximos passos}}
+\\begin{{itemize}}
+\\item Validar curva com medição real.
+\\item Refinar premissas tarifárias.
+\\item Realizar visita técnica.
+\\end{{itemize}}
+\\end{{document}}
+"""
+    files["relatorio.tex"] = latex.encode("utf-8")
+    files["relatorio_dados.json"] = json.dumps(report, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, data in files.items():
+            zf.writestr(fname, data)
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
 
 if "PVWATTS_API_KEY" in st.secrets:
     os.environ["PVWATTS_API_KEY"] = st.secrets["PVWATTS_API_KEY"]
@@ -414,8 +495,25 @@ if step == 4:
 if step == 5:
     st.header("ETAPA 5 — Dimensionamento Técnico")
     st.info("Nesta etapa, dimensionamos a melhor solução tecnicamente viável.")
-    azimuth = st.selectbox("Azimute", [0, 90, 180, 270], index=2)
-    tilt = st.number_input("Inclinação (tilt)", value=float(abs(st.session_state["latitude"])), format="%.2f")
+    azimuth_manual = st.selectbox("Azimute manual (fallback)", [0, 90, 180, 270], index=2)
+    tilt = st.number_input("Inclinação (tilt) [padrão = latitude]", value=float(abs(st.session_state["latitude"])), format="%.2f")
+    if st.button("Aplicar tilt padrão da latitude"):
+        tilt = float(abs(st.session_state["latitude"]))
+
+    st.caption("Opcional: defina o azimute pelo mapa marcando dois pontos (base da placa e direção da face).")
+    if st.session_state.get("adv_map_center"):
+        map_orient = render_area_map(st.session_state["adv_map_center"], key="azimuth_map")
+        drawing2 = map_orient.get("last_active_drawing") if isinstance(map_orient, dict) else None
+        azimuth_map = None
+        if drawing2 and drawing2.get("geometry", {}).get("type") == "LineString":
+            coords = drawing2["geometry"]["coordinates"]
+            if len(coords) >= 2:
+                start_lon, start_lat = coords[0]
+                end_lon, end_lat = coords[-1]
+                azimuth_map = calculate_azimuth_from_points(start_lat, start_lon, end_lat, end_lon)
+                st.session_state["azimuth_from_map"] = azimuth_map
+                st.success(f"Azimute calculado no mapa: {azimuth_map:.1f}°")
+    azimuth = int(round(st.session_state.get("azimuth_from_map", azimuth_manual)))
 
     hist_kwh_year = 0.0
     if st.session_state["tariff_group"] == "B":
@@ -612,6 +710,13 @@ if step == 8:
 
     report_json = json.dumps(report, ensure_ascii=False, indent=2, default=str)
     st.download_button("Baixar relatório final (JSON)", report_json, file_name="aurumcalc_relatorio_final.json", mime="application/json")
+    zip_bytes = build_latex_report_zip(report)
+    st.download_button(
+        "Baixar pacote LaTeX + gráficos (.zip)",
+        zip_bytes,
+        file_name="aurumcalc_relatorio_latex.zip",
+        mime="application/zip",
+    )
 
 st.markdown("---")
 nav_prev, nav_next = st.columns([1, 1])
