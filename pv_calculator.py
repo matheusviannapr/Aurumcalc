@@ -17,7 +17,7 @@ except Exception:
 # Configurações
 # ---------------------------------------------------------
 PVWATTS_API_KEY = os.environ.get("PVWATTS_API_KEY", None)
-PVWATTS_URL = "https://developer.nrel.gov/api/pvwatts/v8.json"
+PVWATTS_URL = os.environ.get("PVWATTS_URL", "https://developer.nlr.gov/api/pvwatts/v8.json")
 
 FILE_PATH_EQUIPAMENTOS_DEFAULT = "BDFotovoltaica.xlsx"
 SHEET_PAIN_EIS = "paineis_solares"

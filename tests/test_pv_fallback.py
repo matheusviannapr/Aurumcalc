@@ -83,3 +83,8 @@ def test_realizar_dimensionamento_usa_fallback_quando_pvwatts_falha(monkeypatch)
     assert out is not None and not out.empty
     assert out.iloc[0]["fonte_geracao"] == "estimativa_fallback"
     assert float(out.iloc[0]["potencia_pico_necessaria_kw"]) > 0
+
+
+def test_pvwatts_url_usa_novo_dominio_nlr():
+    assert pvc.PVWATTS_URL == "https://developer.nlr.gov/api/pvwatts/v8.json"
+    assert "developer.nrel.gov" not in pvc.PVWATTS_URL
