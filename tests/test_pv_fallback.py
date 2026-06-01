@@ -88,3 +88,46 @@ def test_realizar_dimensionamento_usa_fallback_quando_pvwatts_falha(monkeypatch)
 def test_pvwatts_url_usa_novo_dominio_nlr():
     assert pvc.PVWATTS_URL == "https://developer.nlr.gov/api/pvwatts/v8.json"
     assert "developer.nrel.gov" not in pvc.PVWATTS_URL
+
+
+def test_pvwatts_usa_demo_key_quando_chave_nao_foi_configurada(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+        text = ""
+        reason = "OK"
+
+        def json(self):
+            return {"outputs": {"ac_annual": 1500, "ac_monthly": [125] * 12}}
+
+    def fake_get(url, params, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.delenv("PVWATTS_API_KEY", raising=False)
+    monkeypatch.setattr(pvc.requests, "get", fake_get)
+
+    data = pvc.fazer_requisicao_pvwatts({"system_capacity": 1})
+
+    assert data["outputs"]["ac_annual"] == 1500
+    assert captured["params"]["api_key"] == pvc.PVWATTS_DEMO_KEY
+
+
+def test_pvwatts_guarda_detalhe_do_ultimo_erro_http(monkeypatch):
+    class FakeResponse:
+        ok = False
+        status_code = 410
+        text = "Gone"
+        reason = "Gone"
+
+        def json(self):
+            return {"errors": ["Use developer.nlr.gov"]}
+
+    monkeypatch.setattr(pvc.requests, "get", lambda *args, **kwargs: FakeResponse())
+
+    assert pvc.fazer_requisicao_pvwatts({"system_capacity": 1}) is None
+    assert pvc.get_pvwatts_last_error() == "HTTP 410: Use developer.nlr.gov"

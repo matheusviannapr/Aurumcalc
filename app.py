@@ -13,6 +13,7 @@ from pv_calculator import (
     aplicar_restricao_area_resultados,
     calcular_geracao_horaria_pvwatts,
     carregar_dados_equipamentos,
+    get_pvwatts_last_error,
     geocode_location,
     realizar_dimensionamento_completo,
     salvar_novo_inversor,
@@ -593,8 +594,11 @@ if step == 5:
     if isinstance(res, pd.DataFrame) and not res.empty:
         best = res.iloc[0]
         if best.get("fonte_geracao") == "estimativa_fallback":
+            pvwatts_detail = get_pvwatts_last_error()
+            detail_msg = f" Detalhe técnico: {pvwatts_detail}" if pvwatts_detail else ""
             st.warning(
                 "PVWatts indisponível no momento. O dimensionamento foi calculado com estimativa offline de produtividade solar."
+                + detail_msg
             )
         area_meta = st.session_state.get("area_meta") or {"module_area_m2": 2.3, "warnings": []}
         area_req = int(best.get("sistema_num_total_paineis", 0)) * float(area_meta.get("module_area_m2", 2.3))
