@@ -76,7 +76,7 @@ if "PVWATTS_API_KEY" in st.secrets:
     os.environ["PVWATTS_API_KEY"] = st.secrets["PVWATTS_API_KEY"]
 
 st.set_page_config(
-    page_title="AurumCalc | Diagnóstico Energético",
+    page_title="PACE Calculator | Diagnóstico Energético",
     layout="wide",
     initial_sidebar_state="expanded",
     page_icon="⚡",
@@ -439,7 +439,7 @@ def build_latex_report_zip(report: dict) -> bytes:
         "\\hypersetup{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!60!black}\n"
         "\\pagestyle{fancy}\n"
         "\\fancyhf{}\n"
-        "\\fancyhead[L]{\\textbf{AurumCalc} --- Relatório Técnico Fotovoltaico}\n"
+        "\\fancyhead[L]{\\textbf{PACE Calculator} --- Relatório Técnico Fotovoltaico}\n"
         "\\fancyhead[R]{\\today}\n"
         "\\fancyfoot[C]{\\thepage}\n"
         "\\titleformat{\\section}{\\large\\bfseries\\color{blue!40!black}}{\\thesection}{1em}{}\n"
@@ -447,7 +447,7 @@ def build_latex_report_zip(report: dict) -> bytes:
         "\\begin{document}\n\n"
         "\\begin{titlepage}\n"
         "\\centering\n"
-        "{\\Huge\\bfseries\\color{blue!40!black} AurumCalc\\par}\n"
+        "{\\Huge\\bfseries\\color{blue!40!black} PACE Calculator\\par}\n"
         "\\vspace{0.5cm}\n"
         "{\\Large Relatório Técnico de Viabilidade\\par}\n"
         "{\\large Sistema Fotovoltaico Conectado à Rede\\par}\n"
@@ -462,7 +462,7 @@ def build_latex_report_zip(report: dict) -> bytes:
         "\\textbf{Data:} & \\today \\\\\n"
         "\\end{tabular}\n"
         "\\vfill\n"
-        "{\\small Gerado automaticamente pelo \\textbf{AurumCalc} --- Plataforma de Diagnóstico Energético Solar}\n"
+        "{\\small Gerado automaticamente pelo \\textbf{PACE Calculator} --- Plataforma de Diagnóstico Energético Solar}\n"
         "\\end{titlepage}\n\n"
         "\\tableofcontents\n"
         "\\newpage\n\n"
@@ -496,7 +496,7 @@ def build_latex_report_zip(report: dict) -> bytes:
         + "\\section{Próximos Passos}\n\n"
         f"\\begin{{itemize}}\n{prox_items}\n\\end{{itemize}}\n\n"
         "\\section{Declaração e Responsabilidade}\n\n"
-        "Este relatório foi gerado automaticamente pela plataforma \\textbf{AurumCalc} com base nos dados "
+        "Este relatório foi gerado automaticamente pela plataforma \\textbf{PACE Calculator} com base nos dados "
         "fornecidos pelo usuário e nas estimativas de irradiação solar fornecidas pela API PVWatts (NREL). "
         "Os valores são estimativas para fins de pré-viabilidade e devem ser validados por engenheiro "
         "eletricista habilitado antes de qualquer decisão de investimento. "
@@ -583,7 +583,7 @@ def mark_step_complete(step: int):
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
-st.sidebar.title("AurumCalc • Jornada Guiada")
+st.sidebar.title("PACE Calculator • Jornada Guiada")
 progress = (st.session_state["current_step"] - 1) / (len(STEP_NAMES) - 1)
 st.sidebar.progress(progress, text=f"Etapa {st.session_state['current_step']} / {len(STEP_NAMES)}")
 
@@ -672,7 +672,7 @@ with st.sidebar.expander("💾 Banco de projetos", expanded=False):
         st.download_button(
             "⬇️ Exportar todos os projetos",
             data=export_bytes,
-            file_name="aurumcalc_projetos_backup.json",
+            file_name="pace_projetos_backup.json",
             mime="application/json",
             use_container_width=True,
             key="sb_export",
@@ -781,7 +781,7 @@ with st.sidebar.expander("➕ Novo equipamento"):
 # ---------------------------------------------------------------------------
 # Header principal
 # ---------------------------------------------------------------------------
-st.title("⚡ AurumCalc — Plataforma de Diagnóstico Energético Solar")
+st.title("⚡ PACE Calculator — Plataforma de Diagnóstico Energético Solar")
 st.caption("Do diagnóstico ao relatório final: jornada consultiva, guiada e estratégica.")
 
 step = st.session_state["current_step"]
@@ -1695,7 +1695,7 @@ elif step == 8:
         st.download_button(
             "📄 Baixar JSON completo",
             report_json,
-            file_name="aurumcalc_relatorio_final.json",
+            file_name="pace_relatorio_final.json",
             mime="application/json",
             use_container_width=True,
         )
@@ -1705,7 +1705,7 @@ elif step == 8:
         st.download_button(
             "📦 Baixar pacote LaTeX (.zip)",
             zip_bytes,
-            file_name="aurumcalc_relatorio_latex.zip",
+            file_name="pace_relatorio_latex.zip",
             mime="application/zip",
             use_container_width=True,
         )
@@ -1738,7 +1738,7 @@ elif step == 8:
             st.download_button(
                 "📊 Baixar Excel completo (.xlsx)",
                 excel_bytes,
-                file_name="aurumcalc_relatorio_completo.xlsx",
+                file_name="pace_relatorio_completo.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
