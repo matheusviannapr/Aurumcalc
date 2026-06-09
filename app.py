@@ -141,99 +141,371 @@ def load_data():
 # ---------------------------------------------------------------------------
 # Relatório LaTeX
 # ---------------------------------------------------------------------------
+def _tex_escape(s: str) -> str:
+    """Escapa caracteres especiais do LaTeX em strings arbitrárias."""
+    replacements = [
+        ("\\", "\\textbackslash{}"),
+        ("&", "\\&"), ("%", "\\%"), ("$", "\\$"), ("#", "\\#"),
+        ("_", "\\_"), ("{", "\\{"), ("}", "\\}"), ("~", "\\textasciitilde{}"),
+        ("^", "\\textasciicircum{}"),
+    ]
+    for old, new in replacements:
+        s = s.replace(old, new)
+    return s
+
+
+def _tex_str(v) -> str:
+    if v is None:
+        return "N/D"
+    return _tex_escape(str(v))
+
+
+def _tex_table(rows: list[tuple], headers: list[str]) -> str:
+    cols = "l" + "r" * (len(headers) - 1)
+    header_row = " & ".join(f"\\textbf{{{h}}}" for h in headers) + " \\\\"
+    body = "\n".join(" & ".join(_tex_str(c) for c in row) + " \\\\" for row in rows)
+    return (
+        "\\begin{center}\\begin{tabular}{" + cols + "}\n"
+        "\\toprule\n"
+        + header_row + "\n"
+        "\\midrule\n"
+        + body + "\n"
+        "\\bottomrule\n"
+        "\\end{tabular}\\end{center}\n"
+    )
+
+
+def _tex_pgf_bar(coords_str: str, sym_coords: list[str], ylabel: str, title: str, color: str = "blue!60") -> str:
+    sym = ",".join(sym_coords)
+    return (
+        "\\begin{figure}[h!]\\centering\n"
+        "\\begin{tikzpicture}\n"
+        "\\begin{axis}[ybar,symbolic x coords={" + sym + "},xtick=data,"
+        "x tick label style={rotate=45,anchor=east,font=\\small},"
+        "bar width=14pt,enlarge x limits=0.15,"
+        "width=0.95\\linewidth,height=7cm,"
+        f"ylabel={{{ylabel}}},title={{{title}}},"
+        "grid=major,grid style={dotted,gray!40},"
+        f"every axis plot/.append style={{fill={color},draw={color}}}]\n"
+        f"\\addplot coordinates {{{coords_str}}};\n"
+        "\\end{axis}\n"
+        "\\end{tikzpicture}\n"
+        f"\\caption{{{title}}}\n"
+        "\\end{figure}\n"
+    )
+
+
+def _tex_pgf_line(coords_str: str, sym_coords: list[str], ylabel: str, title: str, color: str = "blue!70") -> str:
+    sym = ",".join(sym_coords)
+    return (
+        "\\begin{figure}[h!]\\centering\n"
+        "\\begin{tikzpicture}\n"
+        "\\begin{axis}[symbolic x coords={" + sym + "},xtick=data,"
+        "x tick label style={rotate=45,anchor=east,font=\\tiny},"
+        "width=0.95\\linewidth,height=7cm,"
+        f"ylabel={{{ylabel}}},title={{{title}}},"
+        "grid=major,grid style={dotted,gray!40},"
+        "mark=*,mark size=1.5pt]\n"
+        f"\\addplot[color={color},thick] coordinates {{{coords_str}}};\n"
+        "\\addplot[dashed,red!70,thick] coordinates {{(1,0)({len(sym_coords)},0)}};\n"
+        "\\end{axis}\n"
+        "\\end{tikzpicture}\n"
+        f"\\caption{{{title}}}\n"
+        "\\end{figure}\n"
+    )
+
+
 def build_latex_report_zip(report: dict) -> bytes:
     files = {}
-    figures_tex = []
 
-    historico = report.get("3_historico_consumo", [])
-    if historico:
-        meses = [str(row.get("Mês", i + 1)) for i, row in enumerate(historico)]
-        consumo = [float(row.get("Consumo (kWh)", 0) or 0) for row in historico]
-        coords = " ".join([f"({m},{v:.2f})" for m, v in zip(meses, consumo)])
-        figures_tex.append(
-            "\\begin{figure}[h!]\\centering\\begin{tikzpicture}\\begin{axis}["
-            "ybar,symbolic x coords={" + ",".join(meses) + "},"
-            "xtick=data,x tick label style={rotate=45,anchor=east},"
-            "width=0.95\\linewidth,height=6cm,ylabel={kWh},title={Histórico de consumo}]"
-            f"\\addplot coordinates {{{coords}}};"
-            "\\end{axis}\\end{tikzpicture}\\caption{Histórico de consumo.}\\end{figure}"
-        )
-
+    ex = report.get("1_resumo_executivo", {}) or {}
+    prem = report.get("2_premissas", {}) or {}
+    historico = report.get("3_historico_consumo", []) or []
+    area_info = report.get("5_area_disponivel", {}) or {}
+    sistema = report.get("6_sistema_proposto", {}) or {}
+    adv = report.get("7_analise_energetica", {}) or {}
     eco = report.get("8_viabilidade_economica", {}) or {}
-    fc = eco.get("fluxo_caixa_25anos", [])
-    if fc:
-        anos = [str(r["Ano"]) for r in fc]
-        vpls = [float(r.get("VPL acumulado (R$)", 0) or 0) for r in fc]
-        coords_fc = " ".join([f"({a},{v:.2f})" for a, v in zip(anos, vpls)])
-        figures_tex.append(
-            "\\begin{figure}[h!]\\centering\\begin{tikzpicture}\\begin{axis}["
-            "symbolic x coords={" + ",".join(anos) + "},"
-            "xtick=data,x tick label style={rotate=45,anchor=east,font=\\tiny},"
-            "width=0.95\\linewidth,height=6cm,ylabel={R\\$},title={VPL Acumulado 25 anos}]"
-            f"\\addplot coordinates {{{coords_fc}}};"
-            "\\end{axis}\\end{tikzpicture}\\caption{Evolução do VPL acumulado.}\\end{figure}"
-        )
-
-    sens = eco.get("sensibilidade_tarifaria", {})
-    if sens:
-        labels = list(sens.keys())
-        values = [float(v or 0) for v in sens.values()]
-        coords = " ".join([f"({m},{v:.2f})" for m, v in zip(labels, values)])
-        figures_tex.append(
-            "\\begin{figure}[h!]\\centering\\begin{tikzpicture}\\begin{axis}["
-            "ybar,symbolic x coords={" + ",".join(labels) + "},"
-            "xtick=data,width=0.75\\linewidth,height=6cm,ylabel={R\\$},title={Sensibilidade tarifária}]"
-            f"\\addplot coordinates {{{coords}}};"
-            "\\end{axis}\\end{tikzpicture}\\caption{Sensibilidade tarifária.}\\end{figure}"
-        )
-
-    if not figures_tex:
-        figures_tex.append("Sem dados suficientes para gerar gráficos.")
-
     co2 = eco.get("co2", {}) or {}
+    fc = eco.get("fluxo_caixa_25anos", []) or []
+    capex_bd = eco.get("capex_breakdown", {}) or {}
+    limitacoes = report.get("9_limitacoes", []) or []
+    proximos = report.get("10_proximos_passos", []) or []
 
-    latex = f"""\\documentclass[11pt,a4paper]{{article}}
-\\usepackage[utf8]{{inputenc}}
-\\usepackage[T1]{{fontenc}}
-\\usepackage[brazil]{{babel}}
-\\usepackage{{graphicx}}
-\\usepackage{{booktabs}}
-\\usepackage{{geometry}}
-\\usepackage{{pgfplots}}
-\\pgfplotsset{{compat=1.18}}
-\\geometry{{margin=2.2cm}}
-\\title{{Relatório Técnico Fotovoltaico --- AurumCalc}}
-\\author{{AurumCalc}}
-\\date{{\\today}}
-\\begin{{document}}
-\\maketitle
-\\section{{Resumo executivo}}
-Cliente: {report.get("1_resumo_executivo", {}).get("cliente", "N/D")}\\\\
-Contexto: {report.get("1_resumo_executivo", {}).get("contexto", "N/D")}\\\\
-Local: {report.get("1_resumo_executivo", {}).get("local", "N/D")}\\\\
-\\section{{Premissas}}
-Latitude: {report.get("2_premissas", {}).get("latitude", "N/D")}\\\\
-Longitude: {report.get("2_premissas", {}).get("longitude", "N/D")}\\\\
-\\section{{Análises gráficas}}
-{"".join(figures_tex)}
-\\section{{Resultados principais}}
-Economia anual ano 1 (R\\$): {eco.get("economia_anual", "N/D")}\\\\
-Payback simples (anos): {eco.get("payback", "N/D")}\\\\
-Payback descontado (anos): {eco.get("payback_descontado", "N/D")}\\\\
-VPL 25 anos (R\\$): {eco.get("vpn", "N/D")}\\\\
-TIR real (\\%): {fmt_num((eco.get("tir_real") or 0) * 100, 2)}\\\\
-ROI 25 anos (\\%): {eco.get("roi", "N/D")}\\\\
-CO$_2$ evitado 25 anos (t): {co2.get("co2_evitado_t", "N/D")}\\\\
-\\section{{Próximos passos}}
-\\begin{{itemize}}
-\\item Validar curva com medição real de carga (15 min).
-\\item Refinar premissas tarifárias da distribuidora local.
-\\item Realizar visita técnica para engenharia de instalação.
-\\end{{itemize}}
-\\end{{document}}
-"""
+    # --- Seção: Histórico de consumo ---
+    sec_historico = ""
+    if historico:
+        meses = [_tex_str(row.get("Mês", i + 1)) for i, row in enumerate(historico)]
+        consumo = [float(row.get("Consumo (kWh)") or row.get("Energia ponta (kWh)", 0) or 0) for row in historico]
+        custo = [float(row.get("Custo (R$)", 0) or 0) for row in historico]
+        consumo_anual = sum(consumo)
+        custo_anual = sum(custo)
+        tarifa_media = consumo_anual / custo_anual if custo_anual > 0 else 0
+
+        rows_hist = list(zip(meses, [f"{v:,.0f}" for v in consumo], [f"R\\$ {v:,.2f}" for v in custo]))
+        sec_historico = (
+            "\\section{Histórico de Consumo Energético}\n\n"
+            + _tex_table(rows_hist, ["Mês", "Consumo (kWh)", "Custo (R\\$)"])
+            + f"\n\\textbf{{Consumo anual total:}} {consumo_anual:,.0f} kWh \\\\\n"
+            f"\\textbf{{Custo anual total:}} R\\$ {custo_anual:,.2f} \\\\\n"
+            f"\\textbf{{Tarifa média implícita:}} R\\$ {tarifa_media:.4f}/kWh\n\n"
+        )
+        coords_hist = " ".join(f"({m},{v:.0f})" for m, v in zip(meses, consumo))
+        sec_historico += _tex_pgf_bar(coords_hist, meses, "kWh", "Histórico de consumo mensal", "blue!60")
+
+    # --- Seção: Sistema proposto ---
+    pot_kwp = float(sistema.get("sistema_potencia_total_w", 0) or 0) / 1000.0
+    num_paineis = sistema.get("sistema_num_total_paineis", "N/D")
+    energia_anual = float(sistema.get("energia_gerada_anual_kwh", 0) or 0)
+    sec_sistema = (
+        "\\section{Sistema Fotovoltaico Proposto}\n\n"
+        + _tex_table([
+            ("Potência total do sistema", f"{pot_kwp:.2f} kWp"),
+            ("Número de módulos", _tex_str(num_paineis)),
+            ("Modelo do painel", _tex_str(sistema.get("painel_modelo"))),
+            ("Fabricante do painel", _tex_str(sistema.get("painel_fabricante"))),
+            ("Potência do painel", f"{_tex_str(sistema.get('painel_potencia'))} Wp"),
+            ("Módulos em série", _tex_str(sistema.get("arranjo_modulos_serie"))),
+            ("Strings paralelas/MPPT", _tex_str(sistema.get("arranjo_conjuntos_paralelo_por_mppt"))),
+            ("Inversor", _tex_str(sistema.get("inversor_modelo"))),
+            ("Fabricante inversor", _tex_str(sistema.get("inversor_fabricante"))),
+            ("Quantidade de inversores", _tex_str(sistema.get("inversor_num_unidades"))),
+            ("MPPTs utilizados", _tex_str(sistema.get("inversor_num_mppt"))),
+            ("Energia gerada anual", f"{energia_anual:,.0f} kWh"),
+            ("Área necessária (estimada)", f"{float(area_info.get('area_m2') or 0):.1f} m\\textsuperscript{{2}}"),
+            ("Fator de aproveitamento", f"{float(area_info.get('fator_aproveitamento') or 0.7):.0%}"),
+            ("Fonte do cálculo", _tex_str(sistema.get("fonte_geracao"))),
+        ], ["Parâmetro", "Valor"])
+    )
+
+    # --- Seção: Análise energética ---
+    sc = adv.get("self", {}) or {}
+    ps = adv.get("peak", {}) or {}
+    sec_energetica = ""
+    if sc or ps:
+        sec_energetica = (
+            "\\section{Análise Energética Avançada}\n\n"
+            "\\subsection{Autoconsumo e autossuficiência}\n\n"
+            + _tex_table([
+                ("Taxa de autoconsumo", f"{float(sc.get('self_consumption_ratio', 0) or 0)*100:.1f}\\%"),
+                ("Taxa de autossuficiência", f"{float(sc.get('self_sufficiency_ratio', 0) or 0)*100:.1f}\\%"),
+                ("Injeção na rede (kWh/dia)", f"{float(sc.get('total_grid_export_kwh', 0) or 0):.2f}"),
+                ("Consumo da rede (kWh/dia)", f"{float(sc.get('total_grid_import_kwh', 0) or 0):.2f}"),
+                ("Peak shaving (kW)", f"{float(ps.get('peak_shaving_kw', 0) or 0):.2f}"),
+                ("Redução de pico (%)", f"{float(ps.get('peak_reduction_percent', 0) or 0):.1f}\\%"),
+            ], ["Indicador", "Valor"])
+        )
+
+    # --- Seção: CAPEX ---
+    sec_capex = ""
+    if capex_bd:
+        capex_rows = [(k, f"R\\$ {v:,.2f}") for k, v in capex_bd.items()]
+        capex_total = eco.get("capex_total", sum(capex_bd.values()))
+        capex_rows.append(("\\textbf{Total}", f"\\textbf{{R\\$ {float(capex_total):,.2f}}}"))
+        sec_capex = (
+            "\\section{Composição do Investimento (CAPEX)}\n\n"
+            + _tex_table(capex_rows, ["Item", "Valor (R\\$)"])
+        )
+
+    # --- Seção: Indicadores financeiros ---
+    economia_anual = float(eco.get("economia_anual", 0) or 0)
+    payback = eco.get("payback")
+    payback_desc = eco.get("payback_descontado")
+    vpn = float(eco.get("vpn", 0) or 0)
+    tir = eco.get("tir_real")
+    roi = eco.get("roi")
+
+    sec_financeira = (
+        "\\section{Viabilidade Econômico-Financeira}\n\n"
+        "\\subsection{Premissas do modelo financeiro}\n\n"
+        + _tex_table([
+            ("Tarifa base (R\\$/kWh)", f"R\\$ {float(eco.get('tarifa_base', 0) or 0):.4f}"),
+            ("Degradação anual dos painéis", f"{float(eco.get('degradacao_anual', 0.006) or 0.006)*100:.1f}\\%/ano"),
+            ("Escalada tarifária anual", f"{float(eco.get('escalada_tarifa', 0.05) or 0.05)*100:.1f}\\%/ano"),
+            ("Taxa de desconto (WACC)", f"{float(eco.get('taxa_desconto', 0.10) or 0.10)*100:.1f}\\%"),
+            ("OPEX anual", f"R\\$ {float(eco.get('opex_anual_rs', 0) or 0):,.2f}"),
+            ("Horizonte de análise", "25 anos"),
+        ], ["Premissa", "Valor"])
+        + "\n\\subsection{Indicadores de retorno}\n\n"
+        + _tex_table([
+            ("Economia ano 1 (R\\$)", f"R\\$ {economia_anual:,.2f}"),
+            ("Payback simples", f"{float(payback):.1f} anos" if payback else "N/D"),
+            ("Payback descontado", f"{float(payback_desc):.1f} anos" if payback_desc else "Não atingido em 25 anos"),
+            ("VPL 25 anos (R\\$)", f"R\\$ {vpn:,.2f}"),
+            ("TIR real", f"{float(tir)*100:.2f}\\%" if tir is not None else "N/D"),
+            ("ROI 25 anos", f"{float(roi):.1f}\\%" if roi is not None else "N/D"),
+        ], ["Indicador", "Valor"])
+    )
+
+    # --- Gráfico: VPL acumulado 25 anos ---
+    sec_graficos = "\\section{Análises Gráficas}\n\n"
+    if historico:
+        coords_hist = " ".join(f"({m},{v:.0f})" for m, v in zip(meses, consumo))
+        sec_graficos += _tex_pgf_bar(coords_hist, meses, "kWh", "Histórico de consumo mensal", "blue!60")
+
+    if fc:
+        anos_fc = [str(r["Ano"]) for r in fc]
+        vpls_fc = [float(r.get("VPL acumulado (R$)", 0) or 0) for r in fc]
+        econ_fc = [float(r.get("Fluxo líquido (R$)", 0) or 0) for r in fc]
+        coords_vpl = " ".join(f"({a},{v:.0f})" for a, v in zip(anos_fc, vpls_fc))
+        coords_fc2 = " ".join(f"({a},{v:.0f})" for a, v in zip(anos_fc, econ_fc))
+        sec_graficos += _tex_pgf_line(coords_vpl, anos_fc, "R\\$", "Evolução do VPL acumulado (25 anos)")
+        sec_graficos += _tex_pgf_bar(coords_fc2, anos_fc, "R\\$", "Fluxo de caixa líquido anual", "green!50!black!70")
+
+    sens = eco.get("sensibilidade_tarifaria", {}) or {}
+    if sens:
+        s_labels = list(sens.keys())
+        s_values = [float(v or 0) for v in sens.values()]
+        coords_sens = " ".join(f"({l},{v:.0f})" for l, v in zip(s_labels, s_values))
+        sec_graficos += _tex_pgf_bar(coords_sens, s_labels, "R\\$", "Sensibilidade da economia à tarifa", "orange!70")
+
+    # --- Seção: CO2 ---
+    sec_co2 = ""
+    if co2:
+        sec_co2 = (
+            "\\section{Impacto Ambiental}\n\n"
+            + _tex_table([
+                ("CO\\textsubscript{2} evitado em 25 anos", f"{float(co2.get('co2_evitado_t', 0)):,.1f} t"),
+                ("CO\\textsubscript{2} evitado (kg)", f"{float(co2.get('co2_evitado_kg', 0)):,.0f} kg"),
+                ("Equivalência em árvores plantadas", f"{float(co2.get('arvores_equivalentes', 0)):,.0f} árvores"),
+                ("Fator de emissão SIN (MCTIC 2023)", "0,0839 tCO\\textsubscript{2}eq/MWh"),
+            ], ["Indicador ambiental", "Valor"])
+            + "\n\\textit{Metodologia: fator de emissão da rede SIN conforme MCTIC 2023. "
+            "Equivalência de árvores baseada em absorção média de 100 kg CO\\textsubscript{2}/árvore/ano.}\n\n"
+        )
+
+    # --- Fluxo de caixa completo ---
+    sec_fluxo = ""
+    if fc:
+        fc_rows = [
+            (
+                str(r["Ano"]),
+                f"{float(r.get('Geração (kWh)', 0)):,.0f}",
+                f"R\\$ {float(r.get('Tarifa (R$/kWh)', 0)):.4f}",
+                f"R\\$ {float(r.get('Fluxo líquido (R$)', 0)):,.2f}",
+                f"R\\$ {float(r.get('Fluxo descontado (R$)', 0)):,.2f}",
+                f"R\\$ {float(r.get('VPL acumulado (R$)', 0)):,.2f}",
+            )
+            for r in fc
+        ]
+        sec_fluxo = (
+            "\\section{Fluxo de Caixa — 25 Anos}\n\n"
+            "\\begin{center}\\footnotesize\n"
+            "\\begin{tabular}{rrrrrrr}\n"
+            "\\toprule\n"
+            "\\textbf{Ano} & \\textbf{Geração (kWh)} & \\textbf{Tarifa} & "
+            "\\textbf{Fluxo líq.} & \\textbf{Fluxo desc.} & \\textbf{VPL acum.} \\\\\n"
+            "\\midrule\n"
+            + "\n".join(" & ".join(r) + " \\\\" for r in fc_rows)
+            + "\n\\bottomrule\n\\end{tabular}\n\\end{center}\n\n"
+        )
+
+    # --- Limitações e próximos passos ---
+    sec_limite = ""
+    if limitacoes:
+        items = "\n".join(f"\\item {_tex_str(l)}" for l in limitacoes)
+        sec_limite = f"\\section{{Limitações e Alertas}}\n\\begin{{itemize}}\n{items}\n\\end{{itemize}}\n\n"
+
+    prox_items = "\n".join(f"\\item {_tex_str(p)}" for p in (proximos or [
+        "Validar curva com medição real de carga (15 min).",
+        "Refinar premissas tarifárias da distribuidora local.",
+        "Realizar visita técnica para engenharia de instalação.",
+        "Contratar laudos de engenharia (ART/RRT).",
+        "Solicitar aprovação à distribuidora (acesso à rede).",
+    ]))
+
+    latex = (
+        "\\documentclass[11pt,a4paper]{article}\n"
+        "\\usepackage[utf8]{inputenc}\n"
+        "\\usepackage[T1]{fontenc}\n"
+        "\\usepackage[brazil]{babel}\n"
+        "\\usepackage{graphicx}\n"
+        "\\usepackage{booktabs}\n"
+        "\\usepackage{geometry}\n"
+        "\\usepackage{pgfplots}\n"
+        "\\usepackage{xcolor}\n"
+        "\\usepackage{titlesec}\n"
+        "\\usepackage{fancyhdr}\n"
+        "\\usepackage{hyperref}\n"
+        "\\pgfplotsset{compat=1.18}\n"
+        "\\geometry{margin=2.2cm}\n"
+        "\\hypersetup{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!60!black}\n"
+        "\\pagestyle{fancy}\n"
+        "\\fancyhf{}\n"
+        "\\fancyhead[L]{\\textbf{AurumCalc} --- Relatório Técnico Fotovoltaico}\n"
+        "\\fancyhead[R]{\\today}\n"
+        "\\fancyfoot[C]{\\thepage}\n"
+        "\\titleformat{\\section}{\\large\\bfseries\\color{blue!40!black}}{\\thesection}{1em}{}\n"
+        "\\titleformat{\\subsection}{\\normalsize\\bfseries}{\\thesubsection}{1em}{}\n"
+        "\\begin{document}\n\n"
+        "\\begin{titlepage}\n"
+        "\\centering\n"
+        "{\\Huge\\bfseries\\color{blue!40!black} AurumCalc\\par}\n"
+        "\\vspace{0.5cm}\n"
+        "{\\Large Relatório Técnico de Viabilidade\\par}\n"
+        "{\\large Sistema Fotovoltaico Conectado à Rede\\par}\n"
+        "\\vspace{1.5cm}\n"
+        "\\begin{tabular}{ll}\n"
+        f"\\textbf{{Cliente:}} & {_tex_str(ex.get('cliente'))} \\\\\n"
+        f"\\textbf{{Localização:}} & {_tex_str(ex.get('local'))} \\\\\n"
+        f"\\textbf{{Distribuidora:}} & {_tex_str(ex.get('distribuidora'))} \\\\\n"
+        f"\\textbf{{Contexto:}} & {_tex_str(ex.get('contexto'))} \\\\\n"
+        f"\\textbf{{Coordenadas:}} & Lat {_tex_str(prem.get('latitude'))}, Lon {_tex_str(prem.get('longitude'))} \\\\\n"
+        f"\\textbf{{Modalidade tarifária:}} & {_tex_str(prem.get('modalidade'))} \\\\\n"
+        "\\textbf{Data:} & \\today \\\\\n"
+        "\\end{tabular}\n"
+        "\\vfill\n"
+        "{\\small Gerado automaticamente pelo \\textbf{AurumCalc} --- Plataforma de Diagnóstico Energético Solar}\n"
+        "\\end{titlepage}\n\n"
+        "\\tableofcontents\n"
+        "\\newpage\n\n"
+        "\\section{Resumo Executivo}\n\n"
+        f"Este relatório apresenta a análise técnica e econômica para implantação de um sistema "
+        f"fotovoltaico conectado à rede para o cliente \\textbf{{{_tex_str(ex.get('cliente', 'N/D'))}}}, "
+        f"localizado em \\textbf{{{_tex_str(ex.get('local', 'N/D'))}}}, "
+        f"distribuidora \\textbf{{{_tex_str(ex.get('distribuidora', 'N/D'))}}}.\n\n"
+        f"O sistema proposto possui potência de \\textbf{{{pot_kwp:.2f} kWp}}, "
+        f"com geração estimada de \\textbf{{{energia_anual:,.0f} kWh/ano}} e "
+        f"economia de \\textbf{{R\\$ {economia_anual:,.2f}/ano}} no primeiro ano.\n\n"
+        + _tex_table([
+            ("Potência instalada", f"{pot_kwp:.2f} kWp"),
+            ("Energia gerada anual", f"{energia_anual:,.0f} kWh"),
+            ("Economia ano 1", f"R\\$ {economia_anual:,.2f}"),
+            ("CAPEX total", f"R\\$ {float(eco.get('capex_total', 0) or 0):,.2f}"),
+            ("Payback simples", f"{float(payback):.1f} anos" if payback else "N/D"),
+            ("VPL 25 anos", f"R\\$ {vpn:,.2f}"),
+            ("TIR real", f"{float(tir)*100:.2f}\\%" if tir is not None else "N/D"),
+            ("CO\\textsubscript{2} evitado", f"{float(co2.get('co2_evitado_t', 0)):,.1f} t em 25 anos"),
+        ], ["Indicador", "Valor"])
+        + "\n" + sec_historico
+        + "\n" + sec_sistema
+        + "\n" + sec_energetica
+        + "\n" + sec_capex
+        + "\n" + sec_financeira
+        + "\n" + sec_graficos
+        + "\n" + sec_co2
+        + "\n" + sec_fluxo
+        + "\n" + sec_limite
+        + "\\section{Próximos Passos}\n\n"
+        f"\\begin{{itemize}}\n{prox_items}\n\\end{{itemize}}\n\n"
+        "\\section{Declaração e Responsabilidade}\n\n"
+        "Este relatório foi gerado automaticamente pela plataforma \\textbf{AurumCalc} com base nos dados "
+        "fornecidos pelo usuário e nas estimativas de irradiação solar fornecidas pela API PVWatts (NREL). "
+        "Os valores são estimativas para fins de pré-viabilidade e devem ser validados por engenheiro "
+        "eletricista habilitado antes de qualquer decisão de investimento. "
+        "O fator de emissão utilizado é o do Sistema Interligado Nacional (SIN), conforme publicação "
+        "do MCTIC de 2023 (0,0839 tCO\\textsubscript{2}eq/MWh).\n\n"
+        "\\end{document}\n"
+    )
+
     files["relatorio.tex"] = latex.encode("utf-8")
     files["relatorio_dados.json"] = json.dumps(report, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+    files["README.txt"] = (
+        "Como compilar o relatório:\n"
+        "1. Instale uma distribuição LaTeX (TeX Live, MiKTeX)\n"
+        "2. Execute: pdflatex relatorio.tex\n"
+        "3. Execute novamente para gerar índice: pdflatex relatorio.tex\n"
+        "Ou use Overleaf (overleaf.com) fazendo upload deste zip.\n"
+    ).encode("utf-8")
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -471,7 +743,7 @@ if step == 1:
             if lat_geo is not None:
                 st.session_state["latitude"] = float(lat_geo)
                 st.session_state["longitude"] = float(lon_geo)
-                st.success(f"Coordenadas: {lat_geo:.5f}, {lon_geo:.5f}")
+                st.rerun()
             else:
                 st.error("Não foi possível localizar o endereço.")
         st.session_state["latitude"] = st.number_input(
@@ -1332,7 +1604,10 @@ elif step == 8:
         )
 
     with dcol3:
-        historico_df = st.session_state.get("historico_df_a") or st.session_state.get("historico_df") or pd.DataFrame()
+        _hdf = st.session_state.get("historico_df_a")
+        if not isinstance(_hdf, pd.DataFrame) or _hdf.empty:
+            _hdf = st.session_state.get("historico_df")
+        historico_df = _hdf if isinstance(_hdf, pd.DataFrame) else pd.DataFrame()
         sistema_dict = report["6_sistema_proposto"]
         premissas_dict = {
             "Cliente": st.session_state.get("cliente_nome", ""),
