@@ -70,21 +70,39 @@ def _estimate_monthly_from_annual(annual_kwh: float) -> list[float]:
 # ---------------------------------------------------------
 def geocode_location(location_name: str):
     """
-    Converte nome de local em (latitude, longitude) via Nominatim (OpenStreetMap).
-    Retorna (None, None) se falhar ou se geopy não estiver disponível.
+    Converte nome de local em (latitude, longitude).
+    Tenta primeiro via geopy/Nominatim, depois fallback direto via requests.
+    Retorna (None, None) se todas as tentativas falharem.
     """
-    if not HAS_GEOPY or not location_name:
+    if not location_name or not location_name.strip():
         return None, None
+
+    # Tentativa 1: geopy com user_agent descritivo
+    if HAS_GEOPY:
+        try:
+            geolocator = Nominatim(user_agent="pace-calculator/1.0 (solar-pv-sizing)")
+            location = geolocator.geocode(location_name.strip(), timeout=15, language="pt")
+            if location:
+                return float(location.latitude), float(location.longitude)
+        except Exception:
+            pass
+
+    # Tentativa 2: chamada direta à API Nominatim via requests
     try:
-        geolocator = Nominatim(user_agent="pv_dimensioning_app")
-        location = geolocator.geocode(location_name, timeout=10)
-        if location:
-            return float(location.latitude), float(location.longitude)
-        return None, None
-    except (GeocoderTimedOut, GeocoderServiceError):
-        return None, None
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": location_name.strip(), "format": "json", "limit": 1},
+            headers={"User-Agent": "pace-calculator/1.0 (solar-pv-sizing)"},
+            timeout=15,
+        )
+        if resp.ok:
+            data = resp.json()
+            if data:
+                return float(data[0]["lat"]), float(data[0]["lon"])
     except Exception:
-        return None, None
+        pass
+
+    return None, None
 
 
 # ---------------------------------------------------------
@@ -108,45 +126,59 @@ def _format_api_errors(errors):
     return None
 
 
-def fazer_requisicao_pvwatts(params: dict):
-    """
-    Chama a API PVWatts com checagem de erros.
-    Retorna dict (JSON) ou None.
-    """
-    _set_pvwatts_last_error(None)
-
+def _fazer_requisicao_pvwatts_single(params: dict) -> tuple:
+    """Faz uma única requisição ao PVWatts. Retorna (data_dict_or_None, error_str_or_None)."""
     api_key = os.environ.get("PVWATTS_API_KEY") or PVWATTS_API_KEY or PVWATTS_DEMO_KEY
     all_params = dict(params)
     all_params["api_key"] = api_key
-
     try:
         resp = requests.get(PVWATTS_URL, params=all_params, timeout=20)
         try:
             data = resp.json()
         except ValueError:
             data = None
-
         if not resp.ok:
             api_errors = _format_api_errors(data.get("errors")) if isinstance(data, dict) else None
             details = api_errors or resp.text[:300] or resp.reason
-            _set_pvwatts_last_error(f"HTTP {resp.status_code}: {details}")
-            return None
-
+            return None, f"HTTP {resp.status_code}: {details}"
         if not isinstance(data, dict):
-            _set_pvwatts_last_error("Resposta da API PVWatts não veio em JSON válido.")
-            return None
-
-        # PVWatts pode retornar 'errors' no topo ou dentro de 'outputs'.
+            return None, "Resposta da API PVWatts nao veio em JSON valido."
         for errors in (data.get("errors"), data.get("outputs", {}).get("errors")):
             api_errors = _format_api_errors(errors)
             if api_errors:
-                _set_pvwatts_last_error(api_errors)
-                return None
-
-        return data
+                return None, api_errors
+        return data, None
     except requests.exceptions.RequestException as exc:
-        _set_pvwatts_last_error(str(exc))
+        return None, str(exc)
+
+
+def fazer_requisicao_pvwatts(params: dict):
+    """
+    Chama a API PVWatts com checagem de erros.
+    Tenta primeiro sem dataset (padrao nsrdb), depois com dataset=intl para
+    localidades fora da cobertura NSRDB (ex: Brasil).
+    Retorna dict (JSON) ou None.
+    """
+    _set_pvwatts_last_error(None)
+
+    # Primeira tentativa: sem forcar dataset (PVWatts escolhe automaticamente)
+    data, err = _fazer_requisicao_pvwatts_single(params)
+    if data is not None:
+        return data
+
+    # Se falhou por falta de dados climaticos, tenta dataset internacional
+    if err and ("No climate data" in err or "422" in err or "nsrdb" in err.lower()):
+        intl_params = dict(params)
+        intl_params["dataset"] = "intl"
+        data2, err2 = _fazer_requisicao_pvwatts_single(intl_params)
+        if data2 is not None:
+            return data2
+        # Reporta o erro do intl se tambem falhou
+        _set_pvwatts_last_error(err2 or err)
         return None
+
+    _set_pvwatts_last_error(err)
+    return None
 
 
 def _extrair_ac_monthly(data: dict):
