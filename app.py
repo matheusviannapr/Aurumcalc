@@ -20,7 +20,15 @@ from pv_calculator import (
     salvar_novo_inversor,
     salvar_novo_painel,
 )
-from src.client_db import list_projects, load_project, upsert_project
+from src.client_db import (
+    delete_project,
+    export_all_projects,
+    import_projects_from_json,
+    list_projects,
+    load_project,
+    storage_backend,
+    upsert_project,
+)
 from src.financials import (
     calcular_co2_evitado,
     calcular_fluxo_caixa,
@@ -599,6 +607,14 @@ with st.sidebar.expander("📦 Base de equipamentos"):
     st.caption(f"Inversores cadastrados: {len(df_i)}")
 
 with st.sidebar.expander("💾 Banco de projetos", expanded=False):
+    try:
+        backend = storage_backend()
+        st.caption(f"Backend: **{backend}**")
+        if backend == "SQLite (local)":
+            st.caption("⚠️ SQLite não persiste no Streamlit Cloud. Configure `DATABASE_URL` nos secrets para persistência permanente.")
+    except Exception:
+        pass
+
     db_client = st.text_input("Cliente", value=st.session_state.get("cliente_nome", ""), key="sb_db_client")
     if db_client and not st.session_state.get("cliente_nome"):
         st.session_state["cliente_nome"] = db_client
@@ -607,27 +623,39 @@ with st.sidebar.expander("💾 Banco de projetos", expanded=False):
     project_labels = [f"{row[0]} | {row[1]} | {row[2][:19]}" for row in project_rows]
     selected_label = st.selectbox("Projetos salvos", options=["Selecione..."] + project_labels, key="sb_proj_select")
 
-    if st.button("Carregar projeto", key="sb_load"):
-        if selected_label == "Selecione...":
-            st.warning("Selecione um projeto.")
-        else:
-            idx = project_labels.index(selected_label)
-            client_name, project_name, _ = project_rows[idx]
-            payload = load_project(client_name, project_name)
-            if payload:
-                _restore_state(payload)
-                st.session_state["active_project"] = f"{client_name}:{project_name}"
-                st.success(f"'{project_name}' carregado.")
-                st.rerun()
+    col_load, col_del = st.columns(2)
+    with col_load:
+        if st.button("Carregar", key="sb_load", use_container_width=True):
+            if selected_label == "Selecione...":
+                st.warning("Selecione um projeto.")
             else:
-                st.error("Projeto não encontrado.")
+                idx = project_labels.index(selected_label)
+                client_name, project_name, _ = project_rows[idx]
+                payload = load_project(client_name, project_name)
+                if payload:
+                    _restore_state(payload)
+                    st.session_state["active_project"] = f"{client_name}:{project_name}"
+                    st.success(f"'{project_name}' carregado.")
+                    st.rerun()
+                else:
+                    st.error("Projeto não encontrado.")
+    with col_del:
+        if st.button("Excluir", key="sb_del", use_container_width=True, type="secondary"):
+            if selected_label == "Selecione...":
+                st.warning("Selecione um projeto.")
+            else:
+                idx = project_labels.index(selected_label)
+                client_name, project_name, _ = project_rows[idx]
+                delete_project(client_name, project_name)
+                st.success(f"'{project_name}' excluído.")
+                st.rerun()
 
     st.session_state["project_name"] = st.text_input(
         "Nome do projeto",
         value=st.session_state.get("project_name", "") or st.session_state.get("localizacao", ""),
         key="sb_proj_name",
     )
-    if st.button("Salvar/Atualizar", key="sb_save"):
+    if st.button("Salvar/Atualizar", key="sb_save", use_container_width=True, type="primary"):
         client_name = (db_client or st.session_state.get("cliente_nome", "")).strip()
         project_name = st.session_state.get("project_name", "").strip()
         if not client_name or not project_name:
@@ -637,60 +665,118 @@ with st.sidebar.expander("💾 Banco de projetos", expanded=False):
             st.session_state["active_project"] = f"{client_name}:{project_name}"
             st.success(f"Projeto '{project_name}' salvo.")
 
+    st.markdown("---")
+    st.caption("**Backup / Migração**")
+    try:
+        export_bytes = export_all_projects()
+        st.download_button(
+            "⬇️ Exportar todos os projetos",
+            data=export_bytes,
+            file_name="aurumcalc_projetos_backup.json",
+            mime="application/json",
+            use_container_width=True,
+            key="sb_export",
+        )
+    except Exception as e:
+        st.caption(f"Exportação indisponível: {e}")
+
+    uploaded = st.file_uploader("⬆️ Importar backup (.json)", type="json", key="sb_import_file")
+    if uploaded and st.button("Importar agora", key="sb_import_btn", use_container_width=True):
+        try:
+            count = import_projects_from_json(uploaded.read())
+            st.success(f"{count} projetos importados.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Falha na importação: {e}")
+
 with st.sidebar.expander("➕ Novo equipamento"):
     tab_p, tab_i = st.tabs(["Painel", "Inversor"])
     with tab_p:
         with st.form("novo_painel", clear_on_submit=True):
-            modelo_p = st.text_input("Modelo")
-            fabricante_p = st.text_input("Fabricante")
-            pmax = st.number_input("Pmax (Wp)", min_value=1.0, value=550.0)
-            voc = st.number_input("Voc (V)", min_value=1.0, value=49.5)
-            isc = st.number_input("Isc (A)", min_value=0.1, value=13.4)
-            if st.form_submit_button("Salvar painel"):
-                ok = salvar_novo_painel(
-                    {
+            st.markdown("**Identificação**")
+            modelo_p = st.text_input("Modelo *", help="Ex: Canadian Solar CS6W-550MS")
+            fabricante_p = st.text_input("Fabricante *", help="Ex: Canadian Solar")
+            st.markdown("**Dados elétricos (STC)**")
+            pmax = st.number_input("Potência máxima Pmax (Wp) *", min_value=1.0, value=550.0, step=5.0,
+                                   help="Potência nominal em condições padrão de teste (STC).")
+            vmp = st.number_input("Tensão de operação ótima Vmp (V)", min_value=0.0, value=41.8, step=0.1,
+                                  help="Tensão no ponto de máxima potência.")
+            imp = st.number_input("Corrente de operação ótima Imp (A)", min_value=0.0, value=13.16, step=0.01,
+                                  help="Corrente no ponto de máxima potência.")
+            voc = st.number_input("Tensão de circuito aberto Voc (V) *", min_value=1.0, value=49.5, step=0.1,
+                                  help="Tensão em circuito aberto (sem carga).")
+            isc = st.number_input("Corrente de curto-circuito Isc (A) *", min_value=0.1, value=13.93, step=0.01,
+                                  help="Corrente em curto-circuito.")
+            eficiencia = st.number_input("Eficiência do módulo (%)", min_value=0.0, max_value=30.0, value=21.3, step=0.1,
+                                         help="Eficiência de conversão do módulo fotovoltaico.")
+            if st.form_submit_button("Salvar painel", type="primary"):
+                if not modelo_p or not fabricante_p:
+                    st.error("Modelo e fabricante são obrigatórios.")
+                else:
+                    ok = salvar_novo_painel({
                         "modelo": modelo_p,
                         "fabricante": fabricante_p,
                         "potencia_maxima_nominal_pmax": pmax,
-                        "tensao_operacao_otima_vmp": 0,
-                        "corrente_operacao_otima_imp": 0,
+                        "tensao_operacao_otima_vmp": vmp,
+                        "corrente_operacao_otima_imp": imp,
                         "tensao_circuito_aberto_voc": voc,
                         "corrente_curto_circuito_isc": isc,
-                        "eficiencia_modulo": 0,
-                    }
-                )
-                st.success("Painel salvo.") if ok else st.error("Falha ao salvar.")
-                _load_equipment_cached.clear()
+                        "eficiencia_modulo": eficiencia,
+                    })
+                    st.success("Painel salvo.") if ok else st.error("Falha ao salvar.")
+                    _load_equipment_cached.clear()
     with tab_i:
         with st.form("novo_inversor", clear_on_submit=True):
-            modelo_i = st.text_input("Modelo ")
-            fabricante_i = st.text_input("Fabricante ")
-            pot_ca = st.number_input("Potência CA (W)", min_value=1.0, value=50000.0)
-            vmax = st.number_input("Vmax CC (V)", min_value=1.0, value=1100.0)
-            if st.form_submit_button("Salvar inversor"):
-                ok = salvar_novo_inversor(
-                    {
+            st.markdown("**Identificação**")
+            modelo_i = st.text_input("Modelo *", help="Ex: Fronius Symo 15.0-3-M")
+            fabricante_i = st.text_input("Fabricante *", help="Ex: Fronius")
+            st.markdown("**Lado CC (entrada FV)**")
+            pot_fv_max = st.number_input("Potência máx. FV entrada (W) *", min_value=1.0, value=50000.0, step=500.0,
+                                         help="Máxima potência CC aceita pelo inversor.")
+            vmax_cc = st.number_input("Tensão máxima CC (V) *", min_value=1.0, value=1100.0, step=10.0,
+                                      help="Tensão máxima de entrada CC (string).")
+            tensao_start = st.number_input("Tensão de partida (V)", min_value=1.0, value=200.0, step=10.0,
+                                           help="Tensão mínima para o inversor iniciar operação.")
+            tensao_nominal_cc = st.number_input("Tensão nominal CC (V)", min_value=1.0, value=600.0, step=10.0)
+            faixa_mpp = st.text_input("Faixa de tensão MPP (V)", value="200-850",
+                                      help="Faixa de operação do rastreador MPPT. Ex: 200-850")
+            num_mppt = st.number_input("Número de MPPT trackers *", min_value=1, max_value=20, value=4, step=1)
+            imax_mppt = st.number_input("Corrente máx. entrada por MPPT (A)", min_value=0.1, value=30.0, step=0.5)
+            isc_mppt = st.number_input("Corrente máx. curto-circuito por MPPT (A)", min_value=0.1, value=40.0, step=0.5)
+            st.markdown("**Lado CA (saída)**")
+            pot_nom_ca = st.number_input("Potência nominal CA (W) *", min_value=1.0, value=50000.0, step=500.0)
+            pot_ap_ca = st.number_input("Potência máx. aparente CA (VA)", min_value=1.0, value=50000.0, step=500.0)
+            vnom_ca = st.number_input("Tensão nominal CA (V)", min_value=100.0, value=380.0, step=10.0)
+            freq_ca = st.selectbox("Frequência da rede", ["60Hz", "50Hz"])
+            imax_saida = st.number_input("Corrente de saída máxima (A)", min_value=0.1, value=80.0, step=1.0)
+            fp_ajust = st.text_input("Fator de potência ajustável", value="0.8i-0.8c",
+                                     help="Faixa de ajuste do fator de potência. Ex: 0.8i-0.8c")
+            fases_ca = st.selectbox("Fases CA", [1, 2, 3], index=2)
+            if st.form_submit_button("Salvar inversor", type="primary"):
+                if not modelo_i or not fabricante_i:
+                    st.error("Modelo e fabricante são obrigatórios.")
+                else:
+                    ok = salvar_novo_inversor({
                         "modelo": modelo_i,
                         "fabricante": fabricante_i,
-                        "potencia_maxima_fv_maxima": pot_ca,
-                        "tensao_maxima_cc": vmax,
-                        "tensao_start": 200,
-                        "tensao_nominal": 600,
-                        "faixa_tensao_mpp": "200-850",
-                        "numero_mpp_trackers": 4,
-                        "corrente_maxima_entrada_por_mppt_tracker": 30,
-                        "corrente_maxima_curto_circuito_por_mppt_tracker": 40,
-                        "maxima_potencia_nominal_ca": pot_ca,
-                        "potencia_maxima_aparente_ca": pot_ca,
-                        "tensao_nominal_ca": 380,
-                        "frequencia_rede_ca": "60Hz",
-                        "corrente_saida_maxima": 80,
-                        "fator_potencia_ajustavel": "0.8i-0.8c",
-                        "quantidade_fases_ca": 3,
-                    }
-                )
-                st.success("Inversor salvo.") if ok else st.error("Falha ao salvar.")
-                _load_equipment_cached.clear()
+                        "potencia_maxima_fv_maxima": pot_fv_max,
+                        "tensao_maxima_cc": vmax_cc,
+                        "tensao_start": tensao_start,
+                        "tensao_nominal": tensao_nominal_cc,
+                        "faixa_tensao_mpp": faixa_mpp,
+                        "numero_mpp_trackers": int(num_mppt),
+                        "corrente_maxima_entrada_por_mppt_tracker": imax_mppt,
+                        "corrente_maxima_curto_circuito_por_mppt_tracker": isc_mppt,
+                        "maxima_potencia_nominal_ca": pot_nom_ca,
+                        "potencia_maxima_aparente_ca": pot_ap_ca,
+                        "tensao_nominal_ca": vnom_ca,
+                        "frequencia_rede_ca": freq_ca,
+                        "corrente_saida_maxima": imax_saida,
+                        "fator_potencia_ajustavel": fp_ajust,
+                        "quantidade_fases_ca": int(fases_ca),
+                    })
+                    st.success("Inversor salvo.") if ok else st.error("Falha ao salvar.")
+                    _load_equipment_cached.clear()
 
 # ---------------------------------------------------------------------------
 # Header principal
@@ -1261,16 +1347,37 @@ elif step == 7:
         annual_generation = float(best.get("energia_gerada_anual_kwh", 0.0) or 0.0)
 
         st.markdown("#### Parâmetros de investimento")
+        capex_modo = st.radio(
+            "Modo de entrada do CAPEX",
+            ["Simplificado (valor único)", "Detalhado (por categoria)"],
+            horizontal=True,
+            help="Simplificado: informe só o valor total. Detalhado: distribua por categoria para o relatório.",
+        )
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("**CAPEX detalhado (R$)**")
-            capex_paineis = st.number_input("Painéis solares", min_value=0.0, value=150000.0, step=1000.0, format="%.2f")
-            capex_inversores = st.number_input("Inversores", min_value=0.0, value=60000.0, step=1000.0, format="%.2f")
-            capex_estrutura = st.number_input("Estrutura e fixação", min_value=0.0, value=30000.0, step=1000.0, format="%.2f")
-            capex_eletrica = st.number_input("Elétrica e cabeamento", min_value=0.0, value=25000.0, step=1000.0, format="%.2f")
-            capex_mao_obra = st.number_input("Mão de obra / instalação", min_value=0.0, value=25000.0, step=1000.0, format="%.2f")
-            capex_engenharia = st.number_input("Engenharia / documentação", min_value=0.0, value=10000.0, step=1000.0, format="%.2f")
-            capex_total = capex_paineis + capex_inversores + capex_estrutura + capex_eletrica + capex_mao_obra + capex_engenharia
+            if capex_modo == "Simplificado (valor único)":
+                st.markdown("**CAPEX total do projeto (R$)**")
+                capex_total = st.number_input(
+                    "Valor total do investimento (R$)",
+                    min_value=0.0, value=300000.0, step=1000.0, format="%.2f",
+                    help="Informe o valor final do projeto incluindo equipamentos, instalação e engenharia.",
+                )
+                capex_paineis = capex_total * 0.50
+                capex_inversores = capex_total * 0.20
+                capex_estrutura = capex_total * 0.10
+                capex_eletrica = capex_total * 0.08
+                capex_mao_obra = capex_total * 0.08
+                capex_engenharia = capex_total * 0.04
+                st.caption("Distribuição estimada gerada automaticamente para o relatório.")
+            else:
+                st.markdown("**CAPEX detalhado por categoria (R$)**")
+                capex_paineis = st.number_input("Painéis solares", min_value=0.0, value=150000.0, step=1000.0, format="%.2f")
+                capex_inversores = st.number_input("Inversores", min_value=0.0, value=60000.0, step=1000.0, format="%.2f")
+                capex_estrutura = st.number_input("Estrutura e fixação", min_value=0.0, value=30000.0, step=1000.0, format="%.2f")
+                capex_eletrica = st.number_input("Elétrica e cabeamento", min_value=0.0, value=25000.0, step=1000.0, format="%.2f")
+                capex_mao_obra = st.number_input("Mão de obra / instalação", min_value=0.0, value=25000.0, step=1000.0, format="%.2f")
+                capex_engenharia = st.number_input("Engenharia / documentação", min_value=0.0, value=10000.0, step=1000.0, format="%.2f")
+                capex_total = capex_paineis + capex_inversores + capex_estrutura + capex_eletrica + capex_mao_obra + capex_engenharia
             st.metric("**CAPEX total (R$)**", fmt_num(capex_total, 2))
 
         with c2:
